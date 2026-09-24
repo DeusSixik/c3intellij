@@ -111,13 +111,32 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			String query = seq.rootType.getFullName();
 			List<C3StructMemberDeclaration> structMembers = Collections.emptyList();
 
-			for (String ident : seq.idents)
+			for (int i = 0; i < seq.idents.size(); i++)
 			{
+				String ident = seq.idents.get(i);
 				structMembers = StructService.INSTANCE.getStructMembers(query + "." + ident, myElement.getProject());
 				C3StructMemberDeclaration member = structMembers.size() == 1 ? structMembers.get(0) : null;
-				FullyQualifiedName nextType = member != null ? member.getStructPathType() : null;
-				if (nextType == null) return Collections.emptyList();
-				query = nextType.getFullName();
+				if (member != null)
+				{
+					FullyQualifiedName nextType = member.getStructPathType();
+					if (nextType != null)
+					{
+						query = nextType.getFullName();
+						continue;
+					}
+				}
+				if (i == seq.idents.size() - 1)
+				{
+					Collection<C3CallablePsiElement> methods =
+						NameIndexService.INSTANCE.findMethodsForType(seq.rootType, ident, myElement.getProject());
+					if (!methods.isEmpty())
+					{
+						return new ArrayList<>(methods);
+					}
+				}
+				return isInvocationCallee()
+					? findMethodsMatchingAccessName()
+					: findFieldsOrMethodsMatchingAccessName();
 			}
 
 			return !structMembers.isEmpty() || isInvocationCallee()

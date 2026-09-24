@@ -146,25 +146,33 @@ public final class TypeCompletionContributor extends CompletionProvider<Completi
             PsiElement psiElement = item.getPsiElement();
             if (!(psiElement instanceof C3TypeName element)) return;
 
-            WriteCommandAction.runWriteCommandAction(context.getProject(), () -> {
-                AddImportQuickFix.ImportAction importAction =
-                    AddImportQuickFix.addImportAsText(element, moduleDefinition);
-
-                ModuleName importModuleName = importAction != null ? importAction.getModuleName() : null;
-                String textToInsert = moduleDefinition.textToInsert(importModuleName, element);
+            int startOffset = lookupTarget.getTextRange().getStartOffset();
+            if (lookupTarget instanceof C3Type c3Type && c3Type.getBaseType() != null && c3Type.getBaseType().getPath() != null)
+            {
+                startOffset = c3Type.getBaseType().getPath().getTextRange().getEndOffset();
+                String textToInsert = element.getFqName().getName();
                 int endOffset = context.getEditor().getCaretModel().getOffset();
+                context.getDocument().replaceString(startOffset, endOffset, textToInsert);
+                return;
+            }
 
-                context.getDocument().replaceString(
-                    lookupTarget.getTextRange().getStartOffset(),
-                    endOffset,
-                    textToInsert
-                );
+            AddImportQuickFix.ImportAction importAction =
+                AddImportQuickFix.addImportAsText(element, moduleDefinition);
 
-                if (importAction != null)
-                {
-                    importAction.write(context.getDocument());
-                }
-            });
+            ModuleName importModuleName = importAction != null ? importAction.getModuleName() : null;
+            String textToInsert = moduleDefinition.textToInsert(importModuleName, element);
+            int endOffset = context.getEditor().getCaretModel().getOffset();
+
+            context.getDocument().replaceString(
+                startOffset,
+                endOffset,
+                textToInsert
+            );
+
+            if (importAction != null)
+            {
+                importAction.write(context.getDocument());
+            }
         }
     }
 }

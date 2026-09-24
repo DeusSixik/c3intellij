@@ -42,6 +42,34 @@ public final class NameIndexService
     }
 
     @NotNull
+    public Collection<C3CallablePsiElement> findMethodsForType(@NotNull org.c3lang.intellij.psi.FullyQualifiedName type, @org.jetbrains.annotations.Nullable String methodName, @NotNull Project project)
+    {
+        List<C3CallablePsiElement> result = new ArrayList<>();
+        String suffix = methodName != null ? "." + methodName : null;
+        String typeName = type.getName();
+        for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
+        {
+            if (suffix != null && !key.endsWith(suffix)) continue;
+            for (C3PsiElement element : getElementsByName(key, project))
+            {
+                if (element instanceof C3CallablePsiElement callable
+                    && callable.getType() != null)
+                {
+                    String targetTypeName = callable.getType().getValue();
+                    if (targetTypeName.equals(typeName) || targetTypeName.equals(type.getFullName()))
+                    {
+                        if (suffix == null || callable.getFqName().getName().endsWith(suffix))
+                        {
+                            result.add(callable);
+                        }
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    @NotNull
     public Collection<C3CallablePsiElement> findMethodsByName(@NotNull String name, @NotNull Project project)
     {
         List<C3CallablePsiElement> result = new ArrayList<>();

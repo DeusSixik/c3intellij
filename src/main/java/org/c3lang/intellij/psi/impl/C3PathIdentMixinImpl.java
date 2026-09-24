@@ -71,8 +71,84 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	public @Nullable FullyQualifiedName findTypeName()
 	{
 		List<C3LocalDeclAfterType> decls = findLocalDeclAfterType();
-		if (decls.size() != 1) return null;
-		return decls.getFirst().findTypeName();
+		if (decls.size() == 1)
+		{
+			FullyQualifiedName fqn = decls.getFirst().findTypeName();
+			if (fqn != null) return fqn;
+		}
+
+		String myName = getNameIdent();
+		if (myName == null) return null;
+
+		C3FuncDef funcDef = null;
+		C3FuncDefinition funcDefinition = PsiTreeUtil.getParentOfType(this, C3FuncDefinition.class);
+		if (funcDefinition != null)
+		{
+			funcDef = funcDefinition.getFuncDef();
+		}
+		else
+		{
+			funcDef = PsiTreeUtil.getParentOfType(this, C3FuncDef.class);
+		}
+
+		if (funcDef != null)
+		{
+			if ("this".equals(myName) || "self".equals(myName))
+			{
+				ShortType methodType = funcDef.getType();
+				if (methodType != null)
+				{
+					return new FullyQualifiedName(funcDef.getModuleName(), methodType.getValue());
+				}
+			}
+
+			C3ParameterList parameterList = funcDef.getFnParameterList().getParameterList();
+			if (parameterList != null)
+			{
+				for (C3ParamDecl paramDecl : parameterList.getParamDeclList())
+				{
+					C3Parameter param = paramDecl.getParameter();
+					boolean matches = myName.equals(param.getNameIdent()) || myName.equals(param.getName());
+					if (!matches)
+					{
+						for (ASTNode node : param.getNode().getChildren(null))
+						{
+							if (node.getElementType() == C3Types.IDENT && myName.equals(node.getText()))
+							{
+								matches = true;
+								break;
+							}
+						}
+					}
+					if (matches)
+					{
+						C3Type type = param.getType();
+						if (type != null)
+						{
+							return resolveBaseTypeFqn(type, funcDef);
+						}
+					}
+				}
+			}
+		}
+
+		return null;
+	}
+
+	private static @Nullable FullyQualifiedName resolveBaseTypeFqn(@NotNull C3Type type, @NotNull C3FuncDef funcDef)
+	{
+		C3BaseType baseType = type.getBaseType();
+		if (baseType.isPrimitiveType()) return null;
+		C3Path path = baseType.getPath();
+		if (path != null)
+		{
+			String pathText = path.getText();
+			if (pathText.endsWith("::")) pathText = pathText.substring(0, pathText.length() - 2);
+			return new FullyQualifiedName(new ModuleName(pathText), baseType.getText());
+		}
+		List<FullyQualifiedName> resolved = funcDef.getModuleDefinition().resolve(type);
+		if (!resolved.isEmpty()) return resolved.get(0);
+		return new FullyQualifiedName(funcDef.getModuleName(), baseType.getText());
 	}
 
 	@Override

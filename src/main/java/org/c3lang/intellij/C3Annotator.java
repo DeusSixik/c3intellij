@@ -303,7 +303,16 @@ public class C3Annotator implements Annotator
         {
             PsiElement parent = psiElement.getParent();
             if (parent instanceof C3FuncName || parent instanceof C3MacroName || parent instanceof C3OptionalType) return;
-            annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(C3SyntaxHighlighter.TYPE_KEY).create();
+            if (psiElement instanceof C3Type c3Type && c3Type.getBaseType() != null && c3Type.getBaseType().getPath() != null)
+            {
+                C3Path path = c3Type.getBaseType().getPath();
+                TextRange range = new TextRange(path.getTextRange().getEndOffset(), c3Type.getTextRange().getEndOffset());
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(C3SyntaxHighlighter.TYPE_KEY).range(range).create();
+            }
+            else
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(C3SyntaxHighlighter.TYPE_KEY).create();
+            }
         }
         else if (psiElement instanceof C3AttributeName)
         {
@@ -311,8 +320,19 @@ public class C3Annotator implements Annotator
         }
         else if (psiElement instanceof C3FuncName element)
         {
-            TextAttributesKey color = element.getType() != null ? C3SyntaxHighlighter.METHOD_KEY : C3SyntaxHighlighter.FUNCTION_KEY;
-            annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(color).create();
+            if (element.getType() != null)
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(C3SyntaxHighlighter.TYPE_KEY).range(element.getType()).create();
+                PsiElement last = element.getLastChild();
+                if (last != null)
+                {
+                    annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(C3SyntaxHighlighter.METHOD_KEY).range(last).create();
+                }
+            }
+            else
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(C3SyntaxHighlighter.FUNCTION_KEY).create();
+            }
         }
         else if (psiElement instanceof C3MacroName element)
         {
@@ -335,6 +355,275 @@ public class C3Annotator implements Annotator
             PsiElement parent = psiElement.getParent();
             if (parent == null) return;
             annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES).textAttributes(colorForTypeDefiniton(parent)).create();
+        }
+        else if (psiElement instanceof C3ModulePath || psiElement instanceof C3ImportPath)
+        {
+            annotateModulePath(psiElement, annotationHolder);
+        }
+        else if (psiElement instanceof C3Path path)
+        {
+            annotatePath(path, annotationHolder);
+        }
+        else if (psiElement instanceof C3Parameter param)
+        {
+            annotateParameter(param, annotationHolder);
+        }
+        else if (psiElement instanceof C3LocalDeclAfterType localDecl)
+        {
+            PsiElement ident = localDecl.getNameIdentElement();
+            if (ident != null)
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                    .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(ident).create();
+            }
+        }
+        else if (psiElement instanceof C3VarDecl varDecl)
+        {
+            ASTNode ident = varDecl.getNode().findChildByType(C3Types.IDENT);
+            if (ident != null)
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                    .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(ident.getTextRange()).create();
+            }
+        }
+        else if (psiElement instanceof C3ForeachVar foreachVar)
+        {
+            ASTNode ident = foreachVar.getNode().findChildByType(C3Types.IDENT);
+            if (ident != null)
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                    .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(ident.getTextRange()).create();
+            }
+        }
+        else if (psiElement instanceof C3IdentifierList identList && psiElement.getParent() instanceof C3StructMemberDeclaration)
+        {
+            for (ASTNode node : identList.getNode().getChildren(null))
+            {
+                if (node.getElementType() == C3Types.IDENT)
+                {
+                    annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                        .textAttributes(C3SyntaxHighlighter.FIELD_KEY).range(node.getTextRange()).create();
+                }
+            }
+        }
+        else if (psiElement instanceof C3StructMemberDeclaration memberDecl)
+        {
+            if (memberDecl.getIdentifierList() == null)
+            {
+                ASTNode ident = memberDecl.getNode().findChildByType(C3Types.IDENT);
+                if (ident != null)
+                {
+                    annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                        .textAttributes(C3SyntaxHighlighter.FIELD_KEY).range(ident.getTextRange()).create();
+                }
+            }
+        }
+        else if (psiElement instanceof C3AccessIdent accessIdent)
+        {
+            annotateAccessIdent(accessIdent, annotationHolder);
+        }
+        else if (psiElement instanceof C3PathIdent pathIdent)
+        {
+            annotatePathIdent(pathIdent, annotationHolder);
+        }
+    }
+
+    private void annotateModulePath(@NotNull PsiElement element, @NotNull AnnotationHolder annotationHolder)
+    {
+        for (ASTNode node : element.getNode().getChildren(null))
+        {
+            if (node.getElementType() == C3Types.IDENT)
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                    .textAttributes(C3SyntaxHighlighter.MODULE_KEY).range(node.getTextRange()).create();
+            }
+        }
+    }
+
+    private void annotatePath(@NotNull C3Path path, @NotNull AnnotationHolder annotationHolder)
+    {
+        for (ASTNode node : path.getNode().getChildren(null))
+        {
+            if (node.getElementType() == C3Types.IDENT)
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                    .textAttributes(C3SyntaxHighlighter.MODULE_KEY).range(node.getTextRange()).create();
+            }
+        }
+    }
+
+    private void annotateParameter(@NotNull C3Parameter param, @NotNull AnnotationHolder annotationHolder)
+    {
+        for (ASTNode node : param.getNode().getChildren(null))
+        {
+            if (node.getElementType() == C3Types.IDENT)
+            {
+                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                    .textAttributes(C3SyntaxHighlighter.PARAMETER_KEY).range(node.getTextRange()).create();
+            }
+        }
+    }
+
+    private void annotateAccessIdent(@NotNull C3AccessIdent accessIdent, @NotNull AnnotationHolder annotationHolder)
+    {
+        PsiElement nameElement = accessIdent.getNameIdentElement();
+        if (nameElement == null) nameElement = accessIdent;
+
+        boolean isCall = false;
+        PsiElement parent = accessIdent.getParent();
+        if (parent != null && parent.getParent() instanceof C3CallExpr accessCall)
+        {
+            PsiElement grandParent = accessCall.getParent();
+            if (grandParent instanceof C3CallExpr callExpr
+                && callExpr.getExpr() == accessCall
+                && callExpr.getCallExprTail() != null
+                && callExpr.getCallExprTail().getCallInvocation() != null)
+            {
+                isCall = true;
+            }
+        }
+
+        TextAttributesKey key = isCall ? C3SyntaxHighlighter.METHOD_CALL_KEY : C3SyntaxHighlighter.FIELD_KEY;
+        annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+            .textAttributes(key).range(nameElement).create();
+    }
+
+    private void annotatePathIdent(@NotNull C3PathIdent pathIdent, @NotNull AnnotationHolder annotationHolder)
+    {
+        PsiElement nameElement = pathIdent.getNameIdentElement();
+        if (nameElement == null) return;
+        String name = nameElement.getText();
+        if (name == null || name.isEmpty()) return;
+
+        boolean isCall = false;
+        PsiElement parent = pathIdent.getParent();
+        if (parent != null && parent.getParent() instanceof C3CallExpr callExpr)
+        {
+            if (callExpr.getExpr() == parent
+                && callExpr.getCallExprTail() != null
+                && callExpr.getCallExprTail().getCallInvocation() != null)
+            {
+                isCall = true;
+            }
+        }
+
+        if (isCall)
+        {
+            annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                .textAttributes(C3SyntaxHighlighter.FUNCTION_CALL_KEY).range(nameElement).create();
+            return;
+        }
+
+        if (pathIdent.getPath() != null)
+        {
+            return;
+        }
+
+        if ("this".equals(name) || "self".equals(name))
+        {
+            annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                .textAttributes(C3SyntaxHighlighter.PARAMETER_KEY).range(nameElement).create();
+            return;
+        }
+
+        PsiElement current = pathIdent;
+        while (current != null && !(current instanceof C3File))
+        {
+            if (current instanceof C3ForeachStmt foreachStmt)
+            {
+                C3ForeachVars vars = foreachStmt.getForeachVars();
+                if (vars != null)
+                {
+                    for (C3ForeachVar v : vars.getForeachVarList())
+                    {
+                        ASTNode idNode = v.getNode().findChildByType(C3Types.IDENT);
+                        if (idNode != null && name.equals(idNode.getText()))
+                        {
+                            annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                                .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(nameElement).create();
+                            return;
+                        }
+                    }
+                }
+            }
+            else if (current instanceof C3CompoundStatement compoundStatement)
+            {
+                for (C3StatementList statementList : compoundStatement.getStatementListList())
+                {
+                    for (C3Statement stmt : statementList.getStatementList())
+                    {
+                        if (stmt.getTextOffset() >= pathIdent.getTextOffset()) break;
+                        if (stmt.getLocalDeclarationStmt() != null)
+                        {
+                            C3DeclStmtAfterType afterType = stmt.getLocalDeclarationStmt().getDeclStmtAfterType();
+                            if (afterType != null)
+                            {
+                                for (C3LocalDeclAfterType decl : afterType.getLocalDeclAfterTypeList())
+                                {
+                                    if (name.equals(decl.getNameIdent()))
+                                    {
+                                        annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                                            .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(nameElement).create();
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        else if (stmt.getVarStmt() != null && stmt.getVarStmt().getVarDecl() != null)
+                        {
+                            ASTNode idNode = stmt.getVarStmt().getVarDecl().getNode().findChildByType(C3Types.IDENT);
+                            if (idNode != null && name.equals(idNode.getText()))
+                            {
+                                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                                    .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(nameElement).create();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            else if (current instanceof C3FuncDef funcDef)
+            {
+                C3ParameterList paramList = funcDef.getFnParameterList().getParameterList();
+                if (paramList != null)
+                {
+                    for (C3ParamDecl paramDecl : paramList.getParamDeclList())
+                    {
+                        C3Parameter p = paramDecl.getParameter();
+                        for (ASTNode node : p.getNode().getChildren(null))
+                        {
+                            if (node.getElementType() == C3Types.IDENT && name.equals(node.getText()))
+                            {
+                                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                                    .textAttributes(C3SyntaxHighlighter.PARAMETER_KEY).range(nameElement).create();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            else if (current instanceof C3MacroDefinition macroDef)
+            {
+                C3MacroParams params = macroDef.getMacroParams();
+                C3ParameterList paramList = params != null ? params.getParameterList() : null;
+                if (paramList != null)
+                {
+                    for (C3ParamDecl paramDecl : paramList.getParamDeclList())
+                    {
+                        C3Parameter p = paramDecl.getParameter();
+                        for (ASTNode node : p.getNode().getChildren(null))
+                        {
+                            if (node.getElementType() == C3Types.IDENT && name.equals(node.getText()))
+                            {
+                                annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                                    .textAttributes(C3SyntaxHighlighter.PARAMETER_KEY).range(nameElement).create();
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            current = current.getParent();
         }
     }
 }

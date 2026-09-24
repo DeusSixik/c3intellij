@@ -35,7 +35,12 @@ import org.c3lang.intellij.psi.FullyQualifiedName;
 import org.c3lang.intellij.psi.ModuleName;
 import org.c3lang.intellij.psi.ParamType;
 import org.c3lang.intellij.psi.ShortType;
+import org.c3lang.intellij.psi.C3ConstDeclarationStmt;
+import org.c3lang.intellij.psi.C3Path;
+import org.c3lang.intellij.psi.C3PathIdent;
+import org.c3lang.intellij.psi.C3TypeFullyQualifiedNamePsiElement;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import javax.swing.Icon;
 import java.util.ArrayList;
@@ -88,10 +93,121 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
         C3PathIdentExpr lookupTarget = CompletionExtensionsKt.siblingOf(parameters, C3PathIdentExpr.class);
         if (lookupTarget == null) return;
 
+        C3PathIdent pathIdent = lookupTarget.getPathIdent();
+        C3Path path = pathIdent != null ? pathIdent.getPath() : null;
+        var project = parameters.getPosition().getProject();
+
+        if (path != null)
+        {
+            String pathText = path.getText();
+            int pathEnd = path.getTextRange().getEndOffset();
+            int caretOffset = parameters.getOffset();
+            String prefix = caretOffset >= pathEnd
+                ? parameters.getEditor().getDocument().getText(new TextRange(pathEnd, caretOffset))
+                : "";
+
+            String qualifier = pathText.endsWith("::") ? pathText.substring(0, pathText.length() - 2) : pathText;
+
+            List<String> targetModules = new ArrayList<>();
+            for (ModuleName imported : moduleDefinition.getImports())
+            {
+                if (imported.getSuffix().equals(qualifier) || imported.getValue().equals(qualifier))
+                {
+                    targetModules.add(imported.getValue());
+                }
+            }
+            ModuleName currentMod = moduleDefinition.getModuleName();
+            if (currentMod != null && (currentMod.getSuffix().equals(qualifier) || currentMod.getValue().equals(qualifier)))
+            {
+                targetModules.add(currentMod.getValue());
+            }
+            if (targetModules.isEmpty())
+            {
+                targetModules.add(qualifier);
+            }
+
+            CompletionResultSet scopedResult = result.withPrefixMatcher(prefix);
+
+            for (String modName : targetModules)
+            {
+                String modulePrefix = modName + "::";
+                for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
+                {
+                    if (!key.startsWith(modulePrefix)) continue;
+
+                    for (C3PsiElement psiElement : StubIndex.getElements(
+                            NameIndex.KEY,
+                            key,
+                            project,
+                            C3ProjectService.getInstance(project).getSearchScope(),
+                            C3PsiElement.class))
+                    {
+                        if (psiElement instanceof C3CallablePsiElement element)
+                        {
+                            String name = element.getFqName().getName();
+                            if (name == null || name.isEmpty()) continue;
+
+                            Icon icon = element instanceof C3MacroDefinition ? C3Icons.Nodes.MACRO : C3Icons.Nodes.FUNCTION;
+                            List<String> parametersList = new ArrayList<>();
+                            for (ParamType pt : element.getParameterTypes())
+                            {
+                                List<String> parts = new ArrayList<>();
+                                ShortType t = pt.getType();
+                                if (t != null) parts.add(t.getFullName());
+                                parts.add(pt.getName());
+                                parametersList.add(String.join(" ", parts));
+                            }
+                            String paramStr = String.join(", ", parametersList);
+                            boolean noParams = parametersList.isEmpty();
+
+                            LookupElementBuilder builder = LookupElementBuilder.create(element, name)
+                                .withIcon(icon)
+                                .withPresentableText(name)
+                                .appendTailText("(" + paramStr + ")", false)
+                                .withTypeText(element.getReturnType() != null ? element.getReturnType().getFullName() : "")
+                                .withInsertHandler((insertionContext, item) -> {
+                                    int end = insertionContext.getTailOffset();
+                                    CharSequence chars = insertionContext.getDocument().getCharsSequence();
+                                    if (end < chars.length() && chars.charAt(end) == '(')
+                                    {
+                                        insertionContext.getEditor().getCaretModel().moveToOffset(end + 1);
+                                    }
+                                    else
+                                    {
+                                        insertionContext.getDocument().insertString(end, "()");
+                                        insertionContext.getEditor().getCaretModel().moveToOffset(noParams ? end + 2 : end + 1);
+                                    }
+                                });
+
+                            scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 10.0));
+                        }
+                        else if (psiElement instanceof C3TypeFullyQualifiedNamePsiElement typeElement)
+                        {
+                            String name = typeElement.getFqName().getName();
+                            if (name == null || name.isEmpty()) continue;
+                            LookupElementBuilder builder = LookupElementBuilder.create(typeElement, name)
+                                .withIcon(C3Icons.Nodes.STRUCT)
+                                .withPresentableText(name);
+                            scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 8.0));
+                        }
+                        else if (psiElement instanceof C3ConstDeclarationStmt constDecl)
+                        {
+                            String name = constDecl.getFqName().getName();
+                            if (name == null || name.isEmpty()) continue;
+                            LookupElementBuilder builder = LookupElementBuilder.create(constDecl, name)
+                                .withIcon(C3Icons.Nodes.CONSTANT)
+                                .withPresentableText(name);
+                            scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 8.0));
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         String lookupString = CompletionExtensionsKt.getLookupString(parameters, lookupTarget);
         var matcher = CompletionExtensionsKt.getMatcher(lookupString);
         TextRange elementRange = lookupTarget.getTextRange();
-        var project = parameters.getPosition().getProject();
         String containingFileName = parameters.getPosition().getContainingFile().getName();
         InsertHandler<LookupElement> insertHandler = new FunctionInsertHandler(moduleDefinition, elementRange);
 
@@ -149,25 +265,23 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
             PsiElement psiElement = item.getPsiElement();
             if (!(psiElement instanceof C3CallablePsiElement element)) return;
 
-            WriteCommandAction.runWriteCommandAction(context.getProject(), () -> {
-                AddImportQuickFix.ImportAction importAction =
-                    AddImportQuickFix.addImportAsText(element, moduleDefinition);
+            AddImportQuickFix.ImportAction importAction =
+                AddImportQuickFix.addImportAsText(element, moduleDefinition);
 
-                ModuleName importModuleName = importAction != null ? importAction.getModuleName() : null;
-                String textToInsert = moduleDefinition.textToInsert(importModuleName, element);
-                int endOffset = context.getEditor().getCaretModel().getOffset();
+            ModuleName importModuleName = importAction != null ? importAction.getModuleName() : null;
+            String textToInsert = moduleDefinition.textToInsert(importModuleName, element);
+            int endOffset = context.getEditor().getCaretModel().getOffset();
 
-                context.getDocument().replaceString(
-                    range.getStartOffset(),
-                    endOffset,
-                    textToInsert
-                );
+            context.getDocument().replaceString(
+                range.getStartOffset(),
+                endOffset,
+                textToInsert
+            );
 
-                if (importAction != null)
-                {
-                    importAction.write(context.getDocument());
-                }
-            });
+            if (importAction != null)
+            {
+                importAction.write(context.getDocument());
+            }
         }
     }
 

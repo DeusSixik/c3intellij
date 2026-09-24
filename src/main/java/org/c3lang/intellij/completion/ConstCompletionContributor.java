@@ -125,26 +125,24 @@ public final class ConstCompletionContributor extends CompletionProvider<Complet
             PsiElement psiElement = item.getPsiElement();
             if (!(psiElement instanceof C3ConstDeclarationStmt element)) return;
 
-            WriteCommandAction.runWriteCommandAction(context.getProject(), () -> {
-                AddImportQuickFix.ImportAction imported =
-                    AddImportQuickFix.addImportAsText(element, moduleDefinition);
+            AddImportQuickFix.ImportAction imported =
+                AddImportQuickFix.addImportAsText(element, moduleDefinition);
 
-                var importedModuleName = imported != null ? imported.getModuleName() : null;
-                String textToInsert = moduleDefinition.textToInsert(importedModuleName, element);
-                int endOffset = context.getEditor().getCaretModel().getOffset();
+            var importedModuleName = imported != null ? imported.getModuleName() : null;
+            String textToInsert = moduleDefinition.textToInsert(importedModuleName, element);
+            int endOffset = context.getEditor().getCaretModel().getOffset();
 
-                context.getDocument().replaceString(
-                    range.getStartOffset(),
-                    endOffset,
-                    textToInsert
-                );
-                context.getEditor().getCaretModel().moveToOffset(range.getStartOffset() + textToInsert.length());
+            context.getDocument().replaceString(
+                range.getStartOffset(),
+                endOffset,
+                textToInsert
+            );
+            context.getEditor().getCaretModel().moveToOffset(range.getStartOffset() + textToInsert.length());
 
-                if (imported != null)
-                {
-                    imported.write(context.getDocument());
-                }
-            });
+            if (imported != null)
+            {
+                imported.write(context.getDocument());
+            }
         }
     }
 }

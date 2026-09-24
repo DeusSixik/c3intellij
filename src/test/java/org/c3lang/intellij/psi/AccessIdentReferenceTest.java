@@ -84,6 +84,84 @@ public class AccessIdentReferenceTest extends BasePlatformTestCase
 		assertEquals(0, instancesOf(resolved, C3CallablePsiElement.class).size());
 	}
 
+	public void testTypedReceiverMethodResolvesExactMethod()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			struct MyTr
+			{
+				int a;
+			}
+
+			fn int MyTr.test()
+			{
+				return 0;
+			}
+
+			fn void caller(MyTr tr)
+			{
+				tr.te<caret>st();
+			}
+			""");
+
+		List<C3CallablePsiElement> methods = instancesOf(resolved, C3CallablePsiElement.class);
+		assertEquals(describe(resolved), 1, methods.size());
+		assertEquals("MyTr.test", methods.get(0).getFqName().getName());
+	}
+
+	public void testPointerReceiverMethodResolvesExactMethod()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			struct MyTr
+			{
+				int a;
+			}
+
+			fn int MyTr.test(MyTr* self)
+			{
+				return 0;
+			}
+
+			fn void caller(MyTr* tr)
+			{
+				tr.te<caret>st();
+			}
+			""");
+
+		List<C3CallablePsiElement> methods = instancesOf(resolved, C3CallablePsiElement.class);
+		assertEquals(describe(resolved), 1, methods.size());
+		assertEquals("MyTr.test", methods.get(0).getFqName().getName());
+	}
+
+	public void testThisReceiverMethodResolvesExactMethod()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			struct MyTr
+			{
+				int a;
+			}
+
+			fn int MyTr.test(MyTr* this)
+			{
+				return 0;
+			}
+
+			fn void MyTr.other(MyTr* this)
+			{
+				this.te<caret>st();
+			}
+			""");
+
+		List<C3CallablePsiElement> methods = instancesOf(resolved, C3CallablePsiElement.class);
+		assertEquals(describe(resolved), 1, methods.size());
+		assertEquals("MyTr.test", methods.get(0).getFqName().getName());
+	}
+
 	private @NotNull List<PsiElement> resolveAccessIdent(@NotNull String code)
 	{
 		myFixture.configureByText("main.c3", code);
