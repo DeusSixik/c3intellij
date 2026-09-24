@@ -5,6 +5,7 @@ import com.intellij.codeInsight.completion.CompletionProvider;
 import com.intellij.codeInsight.completion.CompletionResultSet;
 import com.intellij.codeInsight.completion.InsertHandler;
 import com.intellij.codeInsight.completion.InsertionContext;
+import com.intellij.codeInsight.completion.PrioritizedLookupElement;
 import com.intellij.codeInsight.lookup.LookupElement;
 import com.intellij.codeInsight.lookup.LookupElementBuilder;
 import com.intellij.openapi.command.WriteCommandAction;
@@ -78,6 +79,19 @@ public final class TypeCompletionContributor extends CompletionProvider<Completi
         var project = parameters.getPosition().getProject();
         ModuleName moduleName = moduleDefinition.getModuleName();
         InsertHandler<LookupElement> insertHandler = new StructInsertHandler(moduleDefinition, lookupTarget);
+
+        for (String primType : C3KeywordCompletionContributor.PRIMITIVE_TYPES)
+        {
+            if (matcher.matches(primType))
+            {
+                result.addElement(PrioritizedLookupElement.withPriority(
+                    LookupElementBuilder.create(primType)
+                        .bold()
+                        .withTypeText("primitive type"),
+                    12.0
+                ));
+            }
+        }
 
         for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
         {

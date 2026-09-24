@@ -27,7 +27,7 @@ public class C3TypedHandlerDelegate extends TypedHandlerDelegate
 				}
 			}
 		}
-		else if (c == '.')
+		else if (c == '.' || c == '@' || c == '$')
 		{
 			AutoPopupController.getInstance(project).scheduleAutoPopup(editor);
 		}

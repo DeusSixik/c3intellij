@@ -167,4 +167,123 @@ public class C3CompletionTest extends BasePlatformTestCase
 		assertNotNull("Lookup strings should not be null", lookupStrings);
 		assertTrue("Should suggest foreach variable 'a', got: " + lookupStrings, lookupStrings.contains("a"));
 	}
+
+	public void testBuiltinAttributeCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module main;
+
+			@nod<caret>
+			fn void foo() {}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		if (lookupStrings != null)
+		{
+			assertTrue("Should suggest '@nodiscard', got: " + lookupStrings, lookupStrings.contains("@nodiscard"));
+		}
+		else
+		{
+			assertTrue("Should auto-insert '@nodiscard'", myFixture.getEditor().getDocument().getText().contains("@nodiscard"));
+		}
+	}
+
+	public void testBuiltinConstantsCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module main;
+
+			fn void foo()
+			{
+				$$F<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest '$$FILE', got: " + lookupStrings, lookupStrings.contains("$$FILE"));
+		assertTrue("Should suggest '$$FUNC', got: " + lookupStrings, lookupStrings.contains("$$FUNC"));
+		assertTrue("Should suggest '$$FUNCTION', got: " + lookupStrings, lookupStrings.contains("$$FUNCTION"));
+	}
+
+	public void testCompileTimeDirectivesCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module main;
+
+			fn void foo()
+			{
+				$def<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		if (lookupStrings != null)
+		{
+			assertTrue("Should suggest '$defined', got: " + lookupStrings, lookupStrings.contains("$defined"));
+		}
+		else
+		{
+			assertTrue("Should auto-insert '$defined'", myFixture.getEditor().getDocument().getText().contains("$defined"));
+		}
+	}
+
+	public void testPrimitiveTypesCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module main;
+
+			fn in<caret>
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'int', got: " + lookupStrings, lookupStrings.contains("int"));
+		assertTrue("Should suggest 'int128', got: " + lookupStrings, lookupStrings.contains("int128"));
+	}
+
+	public void testExpressionLiteralsCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module main;
+
+			fn void foo()
+			{
+				var x = tr<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		if (lookupStrings != null)
+		{
+			assertTrue("Should suggest 'true', got: " + lookupStrings, lookupStrings.contains("true"));
+		}
+		else
+		{
+			assertTrue("Should auto-insert 'true'", myFixture.getEditor().getDocument().getText().contains("true"));
+		}
+	}
+
+	public void testStatementKeywordsCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module main;
+
+			fn void foo()
+			{
+				fore<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'foreach', got: " + lookupStrings, lookupStrings.contains("foreach"));
+		assertTrue("Should suggest 'foreach_r', got: " + lookupStrings, lookupStrings.contains("foreach_r"));
+	}
 }
