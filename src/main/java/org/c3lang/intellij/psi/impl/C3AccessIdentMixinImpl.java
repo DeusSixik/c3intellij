@@ -109,6 +109,7 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			}
 
 			String query = seq.rootType.getFullName();
+			FullyQualifiedName currentType = seq.rootType;
 			List<C3StructMemberDeclaration> structMembers = Collections.emptyList();
 
 			for (int i = 0; i < seq.idents.size(); i++)
@@ -121,17 +122,47 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 					FullyQualifiedName nextType = member.getStructPathType();
 					if (nextType != null)
 					{
+						currentType = nextType;
 						query = nextType.getFullName();
 						continue;
 					}
 				}
 				if (i == seq.idents.size() - 1)
 				{
+					for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(myElement.getContainingFile(), C3FuncDef.class))
+					{
+						if (funcDef.getType() != null && currentType.getSuffixName().equals(funcDef.getType().getValue()))
+						{
+							if (funcDef.getFqName().getName().endsWith("." + ident))
+							{
+								return List.of(funcDef);
+							}
+						}
+					}
+
 					Collection<C3CallablePsiElement> methods =
-						NameIndexService.INSTANCE.findMethodsForType(seq.rootType, ident, myElement.getProject());
+						NameIndexService.INSTANCE.findMethodsForType(currentType, ident, myElement.getProject());
 					if (!methods.isEmpty())
 					{
 						return new ArrayList<>(methods);
+					}
+
+					if (currentType.getModule() != null)
+					{
+						C3Module mod = C3ImportPathMixinImpl.findModuleDirectly(currentType.getModule().getValue(), myElement.getProject());
+						if (mod != null)
+						{
+							for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(mod.getContainingFile(), C3FuncDef.class))
+							{
+								if (funcDef.getType() != null && currentType.getSuffixName().equals(funcDef.getType().getValue()))
+								{
+									if (funcDef.getFqName().getName().endsWith("." + ident))
+									{
+										return List.of(funcDef);
+									}
+								}
+							}
+						}
 					}
 				}
 				return isInvocationCallee()
@@ -149,7 +180,30 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			String name = myElement.getNameIdent();
 			if (name == null) return Collections.emptyList();
 
-			return new ArrayList<>(NameIndexService.INSTANCE.findMethodsByName(name, myElement.getProject()));
+			List<C3PsiElement> result = new ArrayList<>();
+			for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(myElement.getContainingFile(), C3FuncDef.class))
+			{
+				if (funcDef.getFqName().getName().endsWith("." + name) && !result.contains(funcDef))
+				{
+					result.add(funcDef);
+				}
+			}
+
+			C3ModuleDefinition moduleDefinition =
+				PsiTreeUtil.getParentOfType(myElement, C3ModuleDefinition.class);
+
+			for (C3CallablePsiElement method : NameIndexService.INSTANCE.findMethodsByName(name, myElement.getProject()))
+			{
+				if (moduleDefinition == null || moduleDefinition.containsImportOrSameModule(method))
+				{
+					if (!result.contains(method))
+					{
+						result.add(method);
+					}
+				}
+			}
+
+			return result;
 		}
 
 		private @NotNull Collection<C3PsiElement> findFieldsOrMethodsMatchingAccessName()
@@ -227,8 +281,18 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			List<String> idents = new ArrayList<>();
 			for (C3PsiElement elem : accessSequence)
 			{
-				if (elem instanceof C3CallExpr)
+				if (elem instanceof C3CallExpr ce)
 				{
+					C3CallExprTail tail = ce.getCallExprTail();
+					if (tail != null && tail.getAccessIdent() != null)
+					{
+						String identName = tail.getAccessIdent().getNameIdent();
+						if (identName != null)
+						{
+							idents.add(identName);
+							continue;
+						}
+					}
 					String text = elem.getText();
 					String[] parts = text.split("\\.");
 					idents.add(parts[parts.length - 1]);

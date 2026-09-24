@@ -95,6 +95,12 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		{
 			if ("this".equals(myName) || "self".equals(myName))
 			{
+				C3Type type = funcDef.getFuncHeader().getFuncName().getType();
+				if (type != null)
+				{
+					FullyQualifiedName fqn = resolveBaseTypeFqn(type, funcDef);
+					if (fqn != null) return fqn;
+				}
 				ShortType methodType = funcDef.getType();
 				if (methodType != null)
 				{
@@ -132,6 +138,33 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			}
 		}
 
+		C3CompoundStatement compoundStatement =
+			PsiTreeUtil.getParentOfType(this, C3CompoundStatement.class);
+		if (compoundStatement != null)
+		{
+			Collection<C3VarDecl> varDecls =
+				PsiTreeUtil.collectElementsOfType(compoundStatement, C3VarDecl.class);
+			for (C3VarDecl v : varDecls)
+			{
+				if (v.getTextOffset() < getTextOffset())
+				{
+					ASTNode identNode = v.getNode().findChildByType(C3Types.IDENT);
+					if (identNode != null && myName.equals(identNode.getText()))
+					{
+						if (v.getExpr() instanceof C3CompoundInitExpr initExpr)
+						{
+							if (funcDef != null)
+							{
+								return resolveBaseTypeFqn(initExpr.getType(), funcDef);
+							}
+							List<FullyQualifiedName> res = initExpr.getModuleDefinition().resolve(initExpr.getType());
+							if (!res.isEmpty()) return res.get(0);
+						}
+					}
+				}
+			}
+		}
+
 		return null;
 	}
 
@@ -139,16 +172,36 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	{
 		C3BaseType baseType = type.getBaseType();
 		if (baseType.isPrimitiveType()) return null;
+		PsiReference ref = baseType.getReference();
+		if (ref != null)
+		{
+			PsiElement resolved = ref.resolve();
+			if (resolved instanceof C3TypeName tn)
+			{
+				return tn.getFqName();
+			}
+		}
+
+		String nameIdent = baseType.getNameIdent();
+		if (nameIdent == null)
+		{
+			nameIdent = baseType.getText();
+			int idx = nameIdent.indexOf('<');
+			if (idx > 0) nameIdent = nameIdent.substring(0, idx).trim();
+			idx = nameIdent.indexOf('(');
+			if (idx > 0) nameIdent = nameIdent.substring(0, idx).trim();
+		}
+
 		C3Path path = baseType.getPath();
 		if (path != null)
 		{
 			String pathText = path.getText();
 			if (pathText.endsWith("::")) pathText = pathText.substring(0, pathText.length() - 2);
-			return new FullyQualifiedName(new ModuleName(pathText), baseType.getText());
+			return new FullyQualifiedName(new ModuleName(pathText), nameIdent);
 		}
 		List<FullyQualifiedName> resolved = funcDef.getModuleDefinition().resolve(type);
 		if (!resolved.isEmpty()) return resolved.get(0);
-		return new FullyQualifiedName(funcDef.getModuleName(), baseType.getText());
+		return new FullyQualifiedName(funcDef.getModuleName(), nameIdent);
 	}
 
 	@Override

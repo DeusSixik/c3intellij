@@ -1,5 +1,6 @@
 package org.c3lang.intellij.completion;
 
+import com.intellij.psi.PsiElement;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 
 import java.util.List;
@@ -285,5 +286,256 @@ public class C3CompletionTest extends BasePlatformTestCase
 		assertNotNull("Lookup strings should not be null", lookupStrings);
 		assertTrue("Should suggest 'foreach', got: " + lookupStrings, lookupStrings.contains("foreach"));
 		assertTrue("Should suggest 'foreach_r', got: " + lookupStrings, lookupStrings.contains("foreach_r"));
+	}
+
+	public void testStdCompletionDoesNotDeleteCode()
+	{
+		myFixture.configureByText("enummap.c3", """
+			module std::collections::enummap;
+
+			struct EnumMap
+			{
+				int x;
+			}
+			""");
+
+		myFixture.configureByText("main.c3", """
+			module testproject;
+			import std::io;
+
+			struct MyTr {
+				int a;
+			}
+
+			fn int main(String[] args)
+			{
+				io::printn("Hello, World!");
+
+				std::<caret>
+
+				MyTr tr;
+
+				tr.test();
+
+				int a = 0;
+
+				return 0;
+			}
+
+			fn void f()  {
+
+			}
+			""");
+
+		myFixture.completeBasic();
+		for (var item : myFixture.getLookupElements())
+		{
+			if (item.getLookupString().contains("EnumMap"))
+			{
+				myFixture.getLookup().setCurrentItem(item);
+				myFixture.finishLookup('\n');
+				break;
+			}
+		}
+		String docText = myFixture.getEditor().getDocument().getText();
+		assertTrue("Document must contain module testproject", docText.contains("module testproject;"));
+		assertTrue("Document must contain fn int main", docText.contains("fn int main(String[] args)"));
+		assertTrue("Document must contain MyTr tr;", docText.contains("MyTr tr;"));
+		assertTrue("Document must contain std::collections::enummap::EnumMap, got:\n" + docText, docText.contains("std::collections::enummap::EnumMap"));
+	}
+
+	public void testStdModuleCompletionAfterScope()
+	{
+		myFixture.configureByText("enummap.c3", """
+			module std::collections::enummap;
+
+			struct EnumMap
+			{
+				int x;
+			}
+			""");
+
+		myFixture.configureByText("main.c3", """
+			module testproject;
+
+			fn void main()
+			{
+				std::<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'collections' submodule, got: " + lookupStrings, lookupStrings.contains("collections"));
+
+		for (var item : myFixture.getLookupElements())
+		{
+			if (item.getLookupString().equals("collections"))
+			{
+				myFixture.getLookup().setCurrentItem(item);
+				myFixture.finishLookup('\n');
+				break;
+			}
+		}
+		String docText = myFixture.getEditor().getDocument().getText();
+		assertTrue("Should insert collections::, got:\n" + docText, docText.contains("std::collections::"));
+	}
+
+	public void testUnqualifiedTypeCompletionAutoImport()
+	{
+		myFixture.configureByText("enummap.c3", """
+			module std::collections::enummap;
+
+			struct EnumMap
+			{
+				int x;
+			}
+			""");
+
+		myFixture.configureByText("main.c3", """
+			module testproject;
+
+			fn void main()
+			{
+				Enum<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest EnumMap, got: " + lookupStrings, lookupStrings.contains("EnumMap"));
+
+		for (var item : myFixture.getLookupElements())
+		{
+			if (item.getLookupString().equals("EnumMap"))
+			{
+				myFixture.getLookup().setCurrentItem(item);
+				myFixture.finishLookup('\n');
+				break;
+			}
+		}
+		String docText = myFixture.getEditor().getDocument().getText();
+		assertTrue("Should insert EnumMap at caret, got:\n" + docText, docText.contains("EnumMap"));
+		assertTrue("Should add import for std::collections::enummap, got:\n" + docText, docText.contains("std::collections::enummap"));
+	}
+
+	public void testScopedTypeCompletionOnImportedModule()
+	{
+		myFixture.configureByText("io.c3", """
+			module std::io;
+
+			struct File
+			{
+				int handle;
+			}
+			""");
+
+		myFixture.configureByText("main.c3", """
+			module testproject;
+			import std::io;
+
+			fn void main()
+			{
+				io::Fi<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest File, got: " + lookupStrings, lookupStrings.contains("File"));
+
+		for (var item : myFixture.getLookupElements())
+		{
+			if (item.getLookupString().equals("File"))
+			{
+				myFixture.getLookup().setCurrentItem(item);
+				myFixture.finishLookup('\n');
+				break;
+			}
+		}
+		String docText = myFixture.getEditor().getDocument().getText();
+		assertTrue("Should insert File after io::, got:\n" + docText, docText.contains("io::File"));
+	}
+
+	public void testChainedSubmoduleAndTypeCompletion()
+	{
+		myFixture.configureByText("hashmap.c3", """
+			module std::collections::map;
+
+			struct HashMap
+			{
+				int size;
+			}
+			""");
+
+		myFixture.configureByText("main.c3", """
+			module testproject;
+
+			fn void main()
+			{
+				std::<caret>
+			}
+			""");
+
+		// 1. At std::<caret>, select "collections"
+		myFixture.completeBasic();
+		List<String> items1 = myFixture.getLookupElementStrings();
+		assertNotNull(items1);
+		assertTrue("Should suggest collections, got: " + items1, items1.contains("collections"));
+		assertEquals("Submodule 'collections' must be suggested exactly once, got: " + items1,
+			1, items1.stream().filter(s -> s.equals("collections")).count());
+
+		for (var item : myFixture.getLookupElements())
+		{
+			if (item.getLookupString().equals("collections"))
+			{
+				myFixture.getLookup().setCurrentItem(item);
+				myFixture.finishLookup('\n');
+				break;
+			}
+		}
+		assertEquals("Should be std::collections::", "module testproject;\n\nfn void main()\n{\n\tstd::collections::\n}\n", myFixture.getEditor().getDocument().getText());
+
+		// 2. At std::collections::<caret>, trigger completion and select "map"
+		myFixture.completeBasic();
+		List<String> items2 = myFixture.getLookupElementStrings();
+		assertNotNull(items2);
+		assertTrue("Should suggest map, got: " + items2, items2.contains("map"));
+		assertEquals("Submodule 'map' must be suggested exactly once, got: " + items2,
+			1, items2.stream().filter(s -> s.equals("map")).count());
+
+		for (var item : myFixture.getLookupElements())
+		{
+			if (item.getLookupString().equals("map"))
+			{
+				myFixture.getLookup().setCurrentItem(item);
+				myFixture.finishLookup('\n');
+				break;
+			}
+		}
+		assertEquals("Should be std::collections::map::", "module testproject;\n\nfn void main()\n{\n\tstd::collections::map::\n}\n", myFixture.getEditor().getDocument().getText());
+
+		// 3. At std::collections::map::<caret>, trigger completion and select "HashMap"
+		myFixture.completeBasic();
+		List<String> items3 = myFixture.getLookupElementStrings();
+		assertNotNull(items3);
+		assertTrue("Should suggest HashMap, got: " + items3, items3.contains("HashMap"));
+		assertEquals("Type 'HashMap' must be suggested exactly once, got: " + items3,
+			1, items3.stream().filter(s -> s.equals("HashMap")).count());
+
+		for (var item : myFixture.getLookupElements())
+		{
+			if (item.getLookupString().equals("HashMap"))
+			{
+				myFixture.getLookup().setCurrentItem(item);
+				myFixture.finishLookup('\n');
+				break;
+			}
+		}
+		String finalText = myFixture.getEditor().getDocument().getText();
+		assertTrue("Should contain std::collections::map::HashMap, got:\n" + finalText, finalText.contains("std::collections::map::HashMap"));
 	}
 }

@@ -64,10 +64,21 @@ public final class StructField
                 C3Type type = declaration.getType();
                 if (type == null) return List.of();
 
-                List<FullyQualifiedName> resolved = module.resolve(type);
-                FullyQualifiedName typeFqn = resolved.size() == 1
-                    ? resolved.get(0)
-                    : new FullyQualifiedName(null, type.getText());
+                FullyQualifiedName typeFqn;
+                if (com.intellij.openapi.project.DumbService.isDumb(body.getProject()))
+                {
+                    // collectFields runs during stub creation, i.e. while indexing
+                    // (dumb mode). References and stub indices must not be touched
+                    // here, so resolve purely syntactically to keep stubs deterministic.
+                    typeFqn = syntacticTypeName(module, type);
+                }
+                else
+                {
+                    List<FullyQualifiedName> resolved = module.resolve(type);
+                    typeFqn = resolved.size() == 1
+                        ? resolved.get(0)
+                        : new FullyQualifiedName(null, type.getText());
+                }
 
                 if (memberName != null)
                 {
@@ -86,6 +97,18 @@ public final class StructField
 
         ASTNode[] children = declaration.getNode().getChildren(TokenSet.create(C3Types.IDENT));
         return children.length > 0 ? children[0].getText() : null;
+    }
+
+    private static @NotNull FullyQualifiedName syntacticTypeName(
+            @NotNull C3ModuleDefinition module,
+            @NotNull C3Type type)
+    {
+        C3BaseType baseType = type.getBaseType();
+        if (baseType != null && baseType.getPath() == null)
+        {
+            return new FullyQualifiedName(module.getModuleName(), baseType.getText());
+        }
+        return new FullyQualifiedName(null, type.getText());
     }
 
     private static @Nullable String joinDot(@Nullable String parentName, @Nullable String fieldName)

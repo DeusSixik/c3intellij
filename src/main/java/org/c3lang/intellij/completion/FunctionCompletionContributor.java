@@ -13,6 +13,7 @@ import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.patterns.ElementPattern;
 import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiFile;
 import com.intellij.psi.stubs.StubIndex;
 import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.util.ProcessingContext;
@@ -38,7 +39,6 @@ import org.c3lang.intellij.psi.ShortType;
 import org.c3lang.intellij.psi.C3ConstDeclarationStmt;
 import org.c3lang.intellij.psi.C3Path;
 import org.c3lang.intellij.psi.C3PathIdent;
-import org.c3lang.intellij.psi.C3TypeFullyQualifiedNamePsiElement;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -125,6 +125,7 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
             {
                 targetModules.add(qualifier);
             }
+            targetModules = new ArrayList<>(new java.util.LinkedHashSet<>(targetModules));
 
             CompletionResultSet scopedResult = result.withPrefixMatcher(prefix);
 
@@ -134,6 +135,8 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
                 for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
                 {
                     if (!key.startsWith(modulePrefix)) continue;
+                    String remainder = key.substring(modulePrefix.length());
+                    if (remainder.contains("::")) continue;
 
                     for (C3PsiElement psiElement : StubIndex.getElements(
                             NameIndex.KEY,
@@ -181,17 +184,11 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
 
                             scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 10.0));
                         }
-                        else if (psiElement instanceof C3TypeFullyQualifiedNamePsiElement typeElement)
-                        {
-                            String name = typeElement.getFqName().getName();
-                            if (name == null || name.isEmpty()) continue;
-                            LookupElementBuilder builder = LookupElementBuilder.create(typeElement, name)
-                                .withIcon(C3Icons.Nodes.STRUCT)
-                                .withPresentableText(name);
-                            scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 8.0));
-                        }
                         else if (psiElement instanceof C3ConstDeclarationStmt constDecl)
                         {
+                            // NOTE: types in qualified position are provided by
+                            // TypeCompletionContributor; suggesting them here too
+                            // would show every type twice.
                             String name = constDecl.getFqName().getName();
                             if (name == null || name.isEmpty()) continue;
                             LookupElementBuilder builder = LookupElementBuilder.create(constDecl, name)
@@ -209,7 +206,7 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
         var matcher = CompletionExtensionsKt.getMatcher(lookupString);
         TextRange elementRange = lookupTarget.getTextRange();
         String containingFileName = parameters.getPosition().getContainingFile().getName();
-        InsertHandler<LookupElement> insertHandler = new FunctionInsertHandler(moduleDefinition, elementRange);
+        InsertHandler<LookupElement> insertHandler = FunctionInsertHandler.INSTANCE;
 
         for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
         {
@@ -250,14 +247,7 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
     @SuppressWarnings("DuplicatedCode")
     private static final class FunctionInsertHandler implements InsertHandler<LookupElement>
     {
-        private final C3ModuleDefinition moduleDefinition;
-        private final TextRange range;
-
-        private FunctionInsertHandler(@NotNull C3ModuleDefinition moduleDefinition, @NotNull TextRange range)
-        {
-            this.moduleDefinition = moduleDefinition;
-            this.range = range;
-        }
+        public static final FunctionInsertHandler INSTANCE = new FunctionInsertHandler();
 
         @Override
         public void handleInsert(@NotNull InsertionContext context, @NotNull LookupElement item)
@@ -265,22 +255,39 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
             PsiElement psiElement = item.getPsiElement();
             if (!(psiElement instanceof C3CallablePsiElement element)) return;
 
+            int end = context.getTailOffset();
+            CharSequence chars = context.getDocument().getCharsSequence();
+            boolean hasParams = !element.getParameterTypes().isEmpty();
+            if (end < chars.length() && chars.charAt(end) == '(')
+            {
+                context.getEditor().getCaretModel().moveToOffset(end + 1);
+            }
+            else
+            {
+                context.getDocument().insertString(end, "()");
+                context.getEditor().getCaretModel().moveToOffset(hasParams ? end + 1 : end + 2);
+            }
+
+            ModuleName funcModule = element.getModuleName();
+            if (funcModule == null) return;
+
+            PsiFile file = context.getFile();
+            PsiElement atOffset = file.findElementAt(context.getStartOffset());
+            C3ModuleDefinition moduleDef = atOffset != null
+                ? PsiTreeUtil.getParentOfType(atOffset, C3ModuleDefinition.class)
+                : PsiTreeUtil.findChildOfType(file, C3ModuleDefinition.class);
+
+            if (moduleDef == null) return;
+            if (moduleDef.isSameModule(element)) return;
+            if (moduleDef.getVisibleModulePrefix(funcModule) != null) return;
+
             AddImportQuickFix.ImportAction importAction =
-                AddImportQuickFix.addImportAsText(element, moduleDefinition);
+                AddImportQuickFix.addImportAsText(funcModule, moduleDef);
 
-            ModuleName importModuleName = importAction != null ? importAction.getModuleName() : null;
-            String textToInsert = moduleDefinition.textToInsert(importModuleName, element);
-            int endOffset = context.getEditor().getCaretModel().getOffset();
-
-            context.getDocument().replaceString(
-                range.getStartOffset(),
-                endOffset,
-                textToInsert
-            );
-
-            if (importAction != null)
+            if (importAction != null && !(importAction instanceof AddImportQuickFix.ImportAction.Imported))
             {
                 importAction.write(context.getDocument());
+                com.intellij.psi.PsiDocumentManager.getInstance(context.getProject()).commitDocument(context.getDocument());
             }
         }
     }

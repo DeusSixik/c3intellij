@@ -148,9 +148,29 @@ public abstract class C3ModuleDefinitionMixinImpl extends C3PsiElementImpl imple
 			return Collections.singletonList(new FullyQualifiedName(null, type.getBaseType().getText()));
 		}
 
+		com.intellij.psi.PsiReference ref = type.getBaseType().getReference();
+		if (ref != null)
+		{
+			com.intellij.psi.PsiElement resolved = ref.resolve();
+			if (resolved instanceof C3TypeName tn)
+			{
+				return Collections.singletonList(tn.getFqName());
+			}
+		}
+
+		String typeName = type.getBaseType().getNameIdent();
+		if (typeName == null)
+		{
+			typeName = type.getBaseType().getText();
+			int idx = typeName.indexOf('<');
+			if (idx > 0) typeName = typeName.substring(0, idx).trim();
+			idx = typeName.indexOf('(');
+			if (idx > 0) typeName = typeName.substring(0, idx).trim();
+		}
+
 		if (type.getBaseType().getPath() == null)
 		{
-			return Collections.singletonList(new FullyQualifiedName(getModuleName(), type.getBaseType().getText()));
+			return Collections.singletonList(new FullyQualifiedName(getModuleName(), typeName));
 		}
 
 		List<ModuleName> imports = new ArrayList<>();
@@ -162,9 +182,9 @@ public abstract class C3ModuleDefinitionMixinImpl extends C3PsiElementImpl imple
 
 		List<FullyQualifiedName> result = new ArrayList<>();
 		for (C3FullyQualifiedNamePsiElement element :
-			NameIndexService.INSTANCE.findByNameEndsWith(type.getText(), getProject()))
+			NameIndexService.INSTANCE.findByNameEndsWith(typeName, getProject()))
 		{
-			if (element.getFqName().getFullName().endsWith(type.getText())
+			if (element.getFqName().getFullName().endsWith(typeName)
 				&& imports.contains(element.getModuleName()))
 			{
 				result.add(element.getFqName());

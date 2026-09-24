@@ -166,9 +166,43 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 
 	public @NotNull List<String> getStdlibPaths()
 	{
+		try
+		{
+			return collectStdlibPaths(true);
+		}
+		catch (Exception e)
+		{
+			// This getter is called from stub building and reference resolution,
+			// which run on indexing threads: it must never throw.
+			LOG.debug("Unable to resolve C3 stdlib paths", e);
+			return Collections.emptyList();
+		}
+	}
+
+	/**
+	 * Stdlib paths that are already known (project override or configured
+	 * compiler profiles). No compiler detection, no settings writes, never throws.
+	 * Safe to call from stub building and reference resolution.
+	 */
+	public @NotNull List<String> getKnownStdlibPaths()
+	{
+		try
+		{
+			return collectStdlibPaths(false);
+		}
+		catch (Exception e)
+		{
+			LOG.debug("Unable to resolve known C3 stdlib paths", e);
+			return Collections.emptyList();
+		}
+	}
+
+	private @NotNull List<String> collectStdlibPaths(boolean allowDetection)
+	{
 		if (hasStdlibOverride())
 		{
-			return List.of(getStdlibOverridePath());
+			String clean = org.c3lang.intellij.C3StdLibRootsProvider.normalizePath(getStdlibOverridePath());
+			return clean != null ? List.of(clean) : Collections.emptyList();
 		}
 
 		C3SettingsState settings = C3SettingsState.getInstance();
@@ -179,7 +213,8 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 			{
 				if (compilerName.equals(profile.name) && !profile.stdlibPath.isBlank())
 				{
-					return List.of(profile.stdlibPath);
+					String clean = org.c3lang.intellij.C3StdLibRootsProvider.normalizePath(profile.stdlibPath);
+					if (clean != null) return List.of(clean);
 				}
 			}
 		}
@@ -187,14 +222,36 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 		String defaultStdlibPath = settings.getDefaultStdlibPath();
 		if (!defaultStdlibPath.isBlank())
 		{
-			return List.of(defaultStdlibPath);
+			String clean = org.c3lang.intellij.C3StdLibRootsProvider.normalizePath(defaultStdlibPath);
+			if (clean != null) return List.of(clean);
 		}
 
 		ArrayList<String> paths = new ArrayList<>();
 		for (String path : settings.getStdlibPaths())
 		{
-			if (!path.isBlank()) paths.add(path);
+			String clean = org.c3lang.intellij.C3StdLibRootsProvider.normalizePath(path);
+			if (clean != null && !paths.contains(clean)) paths.add(clean);
 		}
+
+		if (allowDetection && paths.isEmpty() && !com.intellij.openapi.project.DumbService.isDumb(project))
+		{
+			try
+			{
+				String detected = org.c3lang.intellij.C3CompilerDetector.detectStdlibPath(settings.getDefaultCompilerBinaryPath());
+				String clean = org.c3lang.intellij.C3StdLibRootsProvider.normalizePath(detected);
+				if (clean != null)
+				{
+					C3SettingsState.CompilerProfile profile = settings.getDefaultCompilerProfile();
+					profile.stdlibPath = clean;
+					settings.setCompilerProfiles(List.of(profile));
+					return List.of(clean);
+				}
+			}
+			catch (Exception ignored)
+			{
+			}
+		}
+
 		return List.copyOf(paths);
 	}
 
@@ -254,6 +311,16 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 		return projectModel == null || !projectModel.isUnderProjectRoot(file) || projectModel.isSourceFile(file);
 	}
 
+	public boolean isStdlibFile(@NotNull VirtualFile file)
+	{
+		String filePath = file.getPath();
+		for (String stdlibPath : getStdlibPaths())
+		{
+			if (filePath.startsWith(stdlibPath)) return true;
+		}
+		return false;
+	}
+
 	public @NotNull GlobalSearchScope getSearchScope()
 	{
 		GlobalSearchScope allScope = GlobalSearchScope.allScope(project);
@@ -262,6 +329,7 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 			@Override
 			public boolean contains(@NotNull VirtualFile file)
 			{
+				if (isStdlibFile(file)) return true;
 				return allScope.contains(file) && acceptsIndexedFile(file);
 			}
 
@@ -274,7 +342,7 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 			@Override
 			public boolean isSearchInLibraries()
 			{
-				return allScope.isSearchInLibraries();
+				return true;
 			}
 		};
 	}

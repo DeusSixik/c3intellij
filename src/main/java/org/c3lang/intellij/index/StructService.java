@@ -25,9 +25,28 @@ public final class StructService
     public List<C3StructMemberDeclaration> getStructMembers(@NotNull String query, @NotNull Project project)
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
+        // Never call StubIndex.getElements() with a key that is not in the index:
+        // it logs "Stub ids not found for key" (see StubProcessingHelper).
+        // The query may be short ("MyTr.a") while index keys are fully
+        // qualified ("testproject::MyTr.a"), so match by suffix and only
+        // query keys that actually exist.
+        for (String key : StubIndex.getInstance().getAllKeys(StructMemberDeclarationIndex.KEY, project))
+        {
+            if (key.equals(query) || key.endsWith("::" + query))
+            {
+                result.addAll(getStructMembersByExactKey(key, project));
+            }
+        }
+        return result;
+    }
+
+    @NotNull
+    private List<C3StructMemberDeclaration> getStructMembersByExactKey(@NotNull String key, @NotNull Project project)
+    {
+        List<C3StructMemberDeclaration> result = new ArrayList<>();
         for (C3PsiElement element : StubIndex.getElements(
                 StructMemberDeclarationIndex.KEY,
-                query,
+                key,
                 project,
                 C3ProjectService.getInstance(project).getSearchScope(),
                 C3PsiElement.class))
@@ -44,11 +63,15 @@ public final class StructService
     public List<C3StructMemberDeclaration> findStructMembers(@NotNull String query, @NotNull Project project)
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
+        String shortQuery = stripModule(query);
         for (String key : StubIndex.getInstance().getAllKeys(StructMemberDeclarationIndex.KEY, project))
         {
-            if (key.startsWith(query))
+            if (key.startsWith(query)
+                || key.equals(query)
+                || key.endsWith("::" + query)
+                || stripModule(key).startsWith(shortQuery))
             {
-                result.addAll(getStructMembers(key, project));
+                result.addAll(getStructMembersByExactKey(key, project));
             }
         }
         return result;
@@ -63,7 +86,7 @@ public final class StructService
         {
             if (key.endsWith(suffix))
             {
-                result.addAll(getStructMembers(key, project));
+                result.addAll(getStructMembersByExactKey(key, project));
             }
         }
         return result;
@@ -147,11 +170,12 @@ public final class StructService
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
         String prefix = query + ".";
+        String shortPrefix = stripModule(query) + ".";
         for (String key : StubIndex.getInstance().getAllKeys(StructMemberDeclarationIndex.KEY, project))
         {
-            if (key.startsWith(prefix))
+            if (key.startsWith(prefix) || stripModule(key).startsWith(shortPrefix))
             {
-                result.addAll(getStructMembers(key, project));
+                result.addAll(getStructMembersByExactKey(key, project));
             }
         }
         return result;
@@ -174,5 +198,12 @@ public final class StructService
             if (value.charAt(i) == '.') count++;
         }
         return count;
+    }
+
+    @NotNull
+    private static String stripModule(@NotNull String key)
+    {
+        int separator = key.lastIndexOf("::");
+        return separator >= 0 ? key.substring(separator + 2) : key;
     }
 }
