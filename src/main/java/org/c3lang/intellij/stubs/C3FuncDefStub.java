@@ -20,6 +20,7 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 	private final @NotNull FullyQualifiedName fqName;
 	private final @Nullable ShortType returnType;
 	private final @NotNull List<ParamType> parameterTypes;
+	private final @Nullable String conditionKey;
 
 	public C3FuncDefStub(
 		@Nullable StubElement<?> parent,
@@ -29,7 +30,8 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		@Nullable ShortType type,
 		@NotNull FullyQualifiedName fqName,
 		@Nullable ShortType returnType,
-		@NotNull List<ParamType> parameterTypes)
+		@NotNull List<ParamType> parameterTypes,
+		@Nullable String conditionKey)
 	{
 		super(parent, elementType);
 		this.sourceFileName = sourceFileName;
@@ -38,6 +40,7 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		this.fqName = fqName;
 		this.returnType = returnType;
 		this.parameterTypes = parameterTypes;
+		this.conditionKey = conditionKey;
 	}
 
 	public C3FuncDefStub(
@@ -58,7 +61,8 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 			ParamType.toParamTypeList(
 				psi.getFnParameterList().getParameterList() != null
 					? psi.getFnParameterList().getParameterList().getParamDeclList()
-					: null)
+					: null),
+			ConditionalGating.conditionKey(psi)
 		);
 	}
 
@@ -75,7 +79,8 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 			readShortType(dataStream),
 			FullyQualifiedName.parse(dataStream.readUTFFast()),
 			readShortType(dataStream),
-			ParamType.deserialize(dataStream)
+			ParamType.deserialize(dataStream),
+			StubStreamExtensions.readNullableUTFFast(dataStream)
 		);
 	}
 
@@ -115,6 +120,11 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		return parameterTypes;
 	}
 
+	public @Nullable String getConditionKey()
+	{
+		return conditionKey;
+	}
+
 	public void serialize(@NotNull StubOutputStream dataStream) throws IOException
 	{
 		dataStream.writeUTFFast(sourceFileName);
@@ -123,5 +133,6 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		dataStream.writeUTFFast(fqName.getFullName());
 		StubStreamExtensions.writeNullableUTFFast(dataStream, returnType != null ? returnType.getFullName() : null);
 		ParamType.serialize(dataStream, parameterTypes);
+		StubStreamExtensions.writeNullableUTFFast(dataStream, conditionKey);
 	}
 }

@@ -8,6 +8,7 @@ import com.intellij.codeInsight.lookup.LookupElementBuilder;
 import com.intellij.psi.PsiComment;
 import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.util.ProcessingContext;
+import org.c3lang.intellij.psi.AttributeSpecs;
 import org.c3lang.intellij.psi.C3AccessIdent;
 import org.c3lang.intellij.psi.C3Attribute;
 import org.c3lang.intellij.psi.C3AttributeName;
@@ -17,32 +18,11 @@ import org.c3lang.intellij.psi.C3PathIdent;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.List;
-import java.util.Set;
+import java.util.Map;
 
 public final class C3AttributeCompletionContributor extends CompletionProvider<CompletionParameters>
 {
 	public static final C3AttributeCompletionContributor INSTANCE = new C3AttributeCompletionContributor();
-
-	private static final List<String> BUILTIN_ATTRIBUTES = List.of(
-		"align", "benchmark", "bigendian", "builtin",
-		"cdecl", "cname", "deprecated", "dynamic",
-		"export", "extname", "inline", "interface",
-		"littleendian", "local", "maydiscard", "mustinit",
-		"naked", "nodiscard", "noinit", "noinline",
-		"noredzone", "nostackprobe", "nostackprotection",
-		"noreturn", "nostrip", "obfuscate", "operator",
-		"overlap", "packed", "priority", "private",
-		"public", "pure", "reflect", "section",
-		"stackprotection", "stackprobe",
-		"stdcall", "test", "unused", "used",
-		"veccall", "wasm", "weak", "winmain"
-	);
-
-	private static final Set<String> ATTRIBUTES_WITH_ARGS = Set.of(
-		"align", "benchmark", "builtin", "cname", "deprecated",
-		"dynamic", "export", "extname", "interface", "operator",
-		"priority", "section", "test", "wasm"
-	);
 
 	private C3AttributeCompletionContributor() {}
 
@@ -85,10 +65,11 @@ public final class C3AttributeCompletionContributor extends CompletionProvider<C
 		CompletionResultSet scopedResult = result.withPrefixMatcher(prefix);
 		double priority = hasAt || insideAttr ? 30.0 : 2.0;
 
-		for (String attr : BUILTIN_ATTRIBUTES)
+		for (Map.Entry<String, AttributeSpecs.Spec> entry : AttributeSpecs.all().entrySet())
 		{
+			String attr = entry.getKey();
 			String fullAttr = "@" + attr;
-			boolean withArgs = ATTRIBUTES_WITH_ARGS.contains(attr);
+			boolean withArgs = entry.getValue().takesArgs();
 
 			LookupElementBuilder builder = LookupElementBuilder.create(fullAttr)
 				.withLookupStrings(List.of(fullAttr, attr))

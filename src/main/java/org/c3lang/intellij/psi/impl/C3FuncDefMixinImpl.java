@@ -122,6 +122,14 @@ public abstract class C3FuncDefMixinImpl extends C3StubBasedPsiElementBase<C3Fun
 	}
 
 	@Override
+	public @Nullable String getConditionKey()
+	{
+		C3FuncDefStub s = getGreenStub();
+		if (s != null) return s.getConditionKey();
+		return ConditionalGating.conditionKey(this);
+	}
+
+	@Override
 	public @NotNull ItemPresentation getPresentation()
 	{
 		return new ItemPresentation()

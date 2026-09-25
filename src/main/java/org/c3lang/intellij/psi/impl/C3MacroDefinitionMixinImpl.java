@@ -124,6 +124,14 @@ public abstract class C3MacroDefinitionMixinImpl extends C3StubBasedPsiElementBa
 	}
 
 	@Override
+	public @Nullable String getConditionKey()
+	{
+		C3MacroDefinitionStub s = getGreenStub();
+		if (s != null) return s.getConditionKey();
+		return ConditionalGating.conditionKey(this);
+	}
+
+	@Override
 	public @NotNull ItemPresentation getPresentation()
 	{
 		return new ItemPresentation()

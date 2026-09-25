@@ -10,6 +10,7 @@ import com.intellij.psi.util.PsiTreeUtil;
 import org.c3lang.intellij.index.InterfaceService;
 import org.c3lang.intellij.index.NameIndex;
 import org.c3lang.intellij.project.C3ProjectService;
+import org.c3lang.intellij.psi.AttributeSpecs;
 import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3CtCaseStmt;
 import org.c3lang.intellij.psi.C3CtIfStmt;
@@ -88,6 +89,26 @@ public final class DuplicateChecker
     {
         List<? extends C3CallablePsiElement> duplicates = findDuplicates(callable, ownerText, implName, isMacro, module, project);
         if (duplicates.isEmpty()) return;
+        // `@weak`/`@weaklink` definitions are superseded by a non-weak one in
+        // the same compilation: never duplicates (spec "Attributes" chapter).
+        if (isWeak(callable))
+        {
+            boolean nonWeakExists = false;
+            for (C3CallablePsiElement other : duplicates)
+            {
+                if (!isWeak(other))
+                {
+                    nonWeakExists = true;
+                    break;
+                }
+            }
+            if (nonWeakExists) return;
+        }
+        else
+        {
+            duplicates = duplicates.stream().filter(other -> !isWeak(other)).toList();
+            if (duplicates.isEmpty()) return;
+        }
 
         C3CallablePsiElement previousSameFile = null;
         boolean otherFile = false;
@@ -184,6 +205,7 @@ public final class DuplicateChecker
             C3CallablePsiElement other = (C3CallablePsiElement) element;
             if (isSameElement(other, callable)) continue;
             if (!hasBody(other) || isConditionallyCompiled(other)) continue;
+            if (!sameCondition(callable, other)) continue;
             if (!implName.equals(other.getName())) continue;
             if (ownerText != null)
             {
@@ -231,6 +253,51 @@ public final class DuplicateChecker
     private static boolean isConditionallyCompiled(@NotNull C3CallablePsiElement callable)
     {
         return PsiTreeUtil.getParentOfType(callable, C3CtIfStmt.class, C3CtSwitchStmt.class, C3CtCaseStmt.class) != null;
+    }
+
+    private static boolean isWeak(@NotNull C3CallablePsiElement callable)
+    {
+        try
+        {
+            if (callable instanceof C3FuncDef funcDef)
+            {
+                return AttributeSpecs.hasAttribute(funcDef.getAttributes(), "weak")
+                    || AttributeSpecs.hasAttribute(funcDef.getAttributes(), "weaklink");
+            }
+            if (callable instanceof C3MacroDefinition macro)
+            {
+                return AttributeSpecs.hasAttribute(macro.getAttributes(), "weak")
+                    || AttributeSpecs.hasAttribute(macro.getAttributes(), "weaklink");
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
+    }
+
+    /**
+     * True duplicate candidates share the same conditional gating: both
+     * unconditional, or gated by textually identical {@code @if}/{@code @feat}
+     * conditions. Declarations in different {@code module X @if(...);} sections
+     * (e.g. per-platform branches) are alternatives, never conflicts.
+     */
+    private static boolean sameCondition(@NotNull C3CallablePsiElement a, @NotNull C3CallablePsiElement b)
+    {
+        return Objects.equals(conditionKeyOf(a), conditionKeyOf(b));
+    }
+
+    private static @Nullable String conditionKeyOf(@NotNull C3CallablePsiElement callable)
+    {
+        try
+        {
+            if (callable instanceof C3FuncDef funcDef) return funcDef.getConditionKey();
+            if (callable instanceof C3MacroDefinition macro) return macro.getConditionKey();
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
     }
 
     private static boolean isSameElement(@NotNull C3CallablePsiElement a, @NotNull C3CallablePsiElement b)

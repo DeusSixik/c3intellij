@@ -90,6 +90,7 @@ public abstract class C3PathConstMixinImpl extends C3PsiNamedElementImpl impleme
 		{
 			C3ModuleDefinition moduleDefinition = myElement.getModuleDefinition();
 			java.util.List<C3PsiElement> result = new java.util.ArrayList<>();
+			if (moduleDefinition == null) return result;
 			for (C3FullyQualifiedNamePsiElement el :
 				NameIndexService.INSTANCE.findByNameEndsWith(myElement.getText(), myElement.getProject()))
 			{
@@ -122,6 +123,7 @@ public abstract class C3PathConstMixinImpl extends C3PsiNamedElementImpl impleme
 		{
 			C3ModuleDefinition moduleDefinition = myElement.getModuleDefinition();
 			java.util.List<C3PsiElement> result = new java.util.ArrayList<>();
+			if (moduleDefinition == null) return result;
 			for (C3FullyQualifiedNamePsiElement el :
 				NameIndexService.INSTANCE.findByNameEndsWith(myElement.getText(), myElement.getProject()))
 			{

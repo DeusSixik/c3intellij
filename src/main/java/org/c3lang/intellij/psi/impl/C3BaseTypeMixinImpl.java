@@ -88,7 +88,7 @@ public abstract class C3BaseTypeMixinImpl extends C3PsiNamedElementImpl implemen
 			C3ModuleDefinition importProvider = myElement.getModuleDefinition();
 			List<C3PsiElement> result = new ArrayList<>();
 			String nameIdent = myElement.getNameIdent();
-			if (nameIdent == null) return result;
+			if (importProvider == null || nameIdent == null) return result;
 
 			for (C3FullyQualifiedNamePsiElement el :
 				NameIndexService.INSTANCE.findType(myElement, myElement.getProject()))

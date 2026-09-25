@@ -9,6 +9,7 @@ import org.c3lang.intellij.project.C3ProjectService;
 import org.c3lang.intellij.psi.C3AliasTypeDecl;
 import org.c3lang.intellij.psi.C3Attribute;
 import org.c3lang.intellij.psi.C3Attributes;
+import org.c3lang.intellij.psi.AttributeSpecs;
 import org.c3lang.intellij.psi.C3BitstructDeclaration;
 import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3EnumDeclaration;
@@ -374,6 +375,8 @@ public final class InterfaceService
         {
             String methodName = interfaceMethod.getNameIdent();
             if (methodName == null) continue;
+            // `@optional` methods need no implementation.
+            if (AttributeSpecs.hasAttribute(interfaceMethod.getAttributes(), "optional")) continue;
             if (!NameIndexService.INSTANCE.findMethodsForType(structType, methodName, project).isEmpty()) continue;
             result.add(interfaceMethod);
         }

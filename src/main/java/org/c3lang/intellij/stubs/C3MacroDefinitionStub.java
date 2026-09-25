@@ -20,6 +20,7 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 	private final @NotNull FullyQualifiedName fqName;
 	private final @Nullable ShortType returnType;
 	private final @NotNull List<ParamType> parameterTypes;
+	private final @Nullable String conditionKey;
 
 	public C3MacroDefinitionStub(
 		@Nullable StubElement<?> parent,
@@ -29,7 +30,8 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 		@Nullable ShortType type,
 		@NotNull FullyQualifiedName fqName,
 		@Nullable ShortType returnType,
-		@NotNull List<ParamType> parameterTypes)
+		@NotNull List<ParamType> parameterTypes,
+		@Nullable String conditionKey)
 	{
 		super(parent, elementType);
 		this.sourceFileName = sourceFileName;
@@ -38,6 +40,7 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 		this.fqName = fqName;
 		this.returnType = returnType;
 		this.parameterTypes = parameterTypes;
+		this.conditionKey = conditionKey;
 	}
 
 	public C3MacroDefinitionStub(
@@ -60,7 +63,8 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 			ParamType.toParamTypeList(
 				psi.getMacroParams().getParameterList() != null
 					? psi.getMacroParams().getParameterList().getParamDeclList()
-					: null)
+					: null),
+			ConditionalGating.conditionKey(psi)
 		);
 	}
 
@@ -77,7 +81,8 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 			StubStreamExtensions.readShortType(dataStream),
 			FullyQualifiedName.parse(dataStream.readUTFFast()),
 			StubStreamExtensions.readShortType(dataStream),
-			ParamType.deserialize(dataStream)
+			ParamType.deserialize(dataStream),
+			StubStreamExtensions.readNullableUTFFast(dataStream)
 		);
 	}
 
@@ -111,6 +116,11 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 		return parameterTypes;
 	}
 
+	public @Nullable String getConditionKey()
+	{
+		return conditionKey;
+	}
+
 	public void serialize(@NotNull StubOutputStream dataStream) throws IOException
 	{
 		dataStream.writeUTFFast(sourceFileName);
@@ -119,5 +129,6 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 		dataStream.writeUTFFast(fqName.getFullName());
 		StubStreamExtensions.writeNullableUTFFast(dataStream, returnType != null ? returnType.getFullName() : null);
 		ParamType.serialize(dataStream, parameterTypes);
+		StubStreamExtensions.writeNullableUTFFast(dataStream, conditionKey);
 	}
 }

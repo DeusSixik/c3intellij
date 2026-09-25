@@ -37,15 +37,8 @@ public class C3AtMacroReference extends C3ReferenceBase<C3PathAtIdent>
         if (InterfaceService.isTrailingBlockReference(myElement)) return Collections.emptyList();
 
         String name = text.strip();
-        C3ModuleDefinition moduleDefinition;
-        try
-        {
-            moduleDefinition = myElement.getModuleDefinition();
-        }
-        catch (Exception e)
-        {
-            return Collections.emptyList();
-        }
+        C3ModuleDefinition moduleDefinition = myElement.getModuleDefinition();
+        if (moduleDefinition == null) return Collections.emptyList();
         List<C3PsiElement> result = new ArrayList<>();
         List<C3PsiElement> others = new ArrayList<>();
         ModuleName here;

@@ -14,6 +14,7 @@ import com.intellij.psi.util.PsiTreeUtil;
 import org.c3lang.intellij.annotation.fix.AddDynamicAttributeFix;
 import org.c3lang.intellij.annotation.fix.AddSelfParameterFix;
 import org.c3lang.intellij.annotation.fix.ImplementInterfaceMethodsFix;
+import org.c3lang.intellij.annotation.AttributeChecks;
 import org.c3lang.intellij.index.InterfaceService;
 import org.c3lang.intellij.index.NameIndexService;
 import org.c3lang.intellij.psi.*;
@@ -22,6 +23,7 @@ import org.c3lang.intellij.types.DuplicateChecker;
 import org.c3lang.intellij.types.InferredType;
 import org.c3lang.intellij.types.TypeChecker;
 
+import java.util.ArrayList;
 import java.util.List;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -63,7 +65,7 @@ public class C3Annotator implements Annotator
         annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
                                     .textAttributes(C3SyntaxHighlighter.ALIAS_NAME_KEY).range(element.getAliasName()).create();
         C3AliasDeclarationSource source = element.getAliasDeclarationSource();
-        assert source != null;
+        if (source == null) return;
         boolean is_ident = element.getAliasName().getNode().findChildByType(C3Types.IDENT) != null;
         boolean is_at_ident = !is_ident && element.getAliasName().getNode().findChildByType(C3Types.AT_IDENT) != null;
         boolean is_const = !is_at_ident && !is_ident;
@@ -456,6 +458,7 @@ public class C3Annotator implements Annotator
         else if (psiElement instanceof C3CallExpr callExpr)
         {
             CallChecker.checkCall(callExpr, annotationHolder);
+            AttributeChecks.checkCallAttributes(callExpr, annotationHolder);
         }
         else if (psiElement instanceof C3StructDeclaration structDecl)
         {
@@ -477,6 +480,10 @@ public class C3Annotator implements Annotator
         else if (psiElement instanceof C3UnaryExpr unaryExpr)
         {
             annotateCast(unaryExpr, annotationHolder);
+        }
+        else if (psiElement instanceof C3Attribute attribute)
+        {
+            AttributeChecks.checkAttribute(attribute, annotationHolder);
         }
     }
 
@@ -631,6 +638,8 @@ public class C3Annotator implements Annotator
     {
         String name = macroDef.getName();
         if (name == null || name.isEmpty() || name.charAt(0) == '@') return;
+        // `@safemacro` explicitly allows dropping the `@` prefix.
+        if (AttributeSpecs.hasAttribute(macroDef.getAttributes(), "safemacro")) return;
         C3MacroParams params = macroDef.getMacroParams();
         if (params == null || params.getParameterList() == null) return;
         for (C3ParamDecl decl : params.getParameterList().getParamDeclList())
@@ -870,6 +879,8 @@ public class C3Annotator implements Annotator
         if (returnType == null || returnType.getValue() == null
             || TypeChecker.isVoidType(returnType.getValue())
             || TypeChecker.isVoidOptionalType(returnType.getValue())) return;
+        // A @noreturn function never falls through: no return needed.
+        if (AttributeSpecs.hasAttribute(funcDef.getAttributes(), "noreturn")) return;
         PsiElement parent = funcDef.getParent();
         if (!(parent instanceof C3FuncDefinition definition)
             || definition.getMacroFuncBody() == null
@@ -884,6 +895,9 @@ public class C3Annotator implements Annotator
         {
             if (funcDef.equals(TypeChecker.enclosingFunction(ret))) return;
         }
+        // The end of the body is unreachable (e.g. it ends with a call to a
+        // @noreturn function like unreachable()): no return needed either.
+        if (bodyNeverFallsThrough(body)) return;
         PsiElement anchor = funcDef.getNameIdentifier() != null ? funcDef.getNameIdentifier() : funcDef;
         holder.newAnnotation(
                 HighlightSeverity.ERROR,
@@ -891,6 +905,83 @@ public class C3Annotator implements Annotator
                     + "' in function '" + funcDef.getFqName().getName() + "'.")
             .range(anchor)
             .create();
+    }
+
+    /**
+     * Whether control can never reach the end of a block: its last statement
+     * returns or diverges (calls a {@code @noreturn} function), including
+     * {@code if}/{@code else} chains where every branch diverges.
+     */
+    private static boolean bodyNeverFallsThrough(@NotNull C3CompoundStatement body)
+    {
+        List<C3Statement> statements = new ArrayList<>();
+        for (C3StatementList statementList : body.getStatementListList())
+        {
+            statements.addAll(statementList.getStatementList());
+        }
+        if (statements.isEmpty()) return false;
+        return statementDiverges(statements.get(statements.size() - 1));
+    }
+
+    private static boolean statementDiverges(@NotNull C3Statement statement)
+    {
+        if (statement.getReturnStmt() != null) return true;
+        if (statement.getExprStmt() != null) return exprDiverges(statement.getExprStmt().getExpr());
+        C3IfStmt ifStmt = statement.getIfStmt();
+        if (ifStmt != null) return ifDiverges(ifStmt);
+        return false;
+    }
+
+    private static boolean ifDiverges(@NotNull C3IfStmt ifStmt)
+    {
+        if (!branchDiverges(ifStmt.getCompoundStatement(), ifStmt.getStatement())) return false;
+        C3ElsePart elsePart = ifStmt.getElsePart();
+        if (elsePart == null) return false;
+        if (elsePart.getIfStmt() != null) return ifDiverges(elsePart.getIfStmt());
+        return branchDiverges(elsePart.getCompoundStatement(), null);
+    }
+
+    private static boolean branchDiverges(@Nullable C3CompoundStatement compound, @Nullable C3Statement single)
+    {
+        if (compound != null) return bodyNeverFallsThrough(compound);
+        if (single != null) return statementDiverges(single);
+        return false;
+    }
+
+    private static boolean exprDiverges(@NotNull C3Expr expr)
+    {
+        if (expr instanceof C3GroupedExpr grouped)
+        {
+            return grouped.getExpr() != null && exprDiverges(grouped.getExpr());
+        }
+        if (expr instanceof C3BinaryExpr binary && TypeChecker.assignmentOperator(binary) != null)
+        {
+            return binary.getRight() != null && exprDiverges(binary.getRight());
+        }
+        if (expr instanceof C3CallExpr call)
+        {
+            if (isNoreturnCall(call)) return true;
+            return call.getExpr() instanceof C3CallExpr inner && exprDiverges(inner);
+        }
+        return false;
+    }
+
+    private static boolean isNoreturnCall(@NotNull C3CallExpr call)
+    {
+        C3CallablePsiElement target;
+        try
+        {
+            target = CallChecker.resolveTarget(call);
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+        if (target == null) return false;
+        C3Attributes attributes = null;
+        if (target instanceof C3FuncDef funcDef) attributes = funcDef.getAttributes();
+        else if (target instanceof C3MacroDefinition macro) attributes = macro.getAttributes();
+        return AttributeSpecs.hasAttribute(attributes, "noreturn");
     }
 
     private void annotateModulePath(@NotNull PsiElement element, @NotNull AnnotationHolder annotationHolder)

@@ -230,6 +230,8 @@ public final class TypeChecker
             @Nullable C3Expr operand)
     {
         if (source == null) return null;
+        // Compile-time type parameters are opaque until instantiation.
+        if (isComptimeParam(targetText) || isComptimeParam(source.getName())) return null;
         String target = stripOptional(normalize(targetText));
         if (target.isEmpty()) return null;
         String sourceName = normalize(source.getName());
@@ -237,13 +239,19 @@ public final class TypeChecker
         // Discarding a value is always fine: (void)expr.
         if (target.equals("void")) return null;
 
+        // Casting an Optional always lifts to an Optional result, propagating
+        // any fault: (T)expr? has type T?. Whether that fits its context is
+        // decided by assignment checking on the inferred T?.
+        if (isOptionalName(sourceName))
+        {
+            String liftedTarget = isOptionalName(normalize(targetText)) ? target : target + "?";
+            return checkCast(project, contextModule, liftedTarget, kindOf(stripOptional(sourceName)), operand);
+        }
+
         // Resolve alias/typedef chains on both sides first (§2.5): after
         // resolution the names may simply match.
-        String resolvedTarget = resolveAlias(target, project, contextModule, 0);
-        if (resolvedTarget == null) resolvedTarget = resolveTypedefChain(target, project, contextModule);
-        if (resolvedTarget == null) resolvedTarget = target;
-        String resolvedSource = resolveSourceType(project, contextModule, sourceName);
-        if (resolvedSource == null) resolvedSource = sourceName;
+        String resolvedTarget = resolveCastType(target, project, contextModule);
+        String resolvedSource = resolveCastType(sourceName, project, contextModule);
         InferredType effectiveSource = source.getName().equals(resolvedSource) ? source : kindOf(resolvedSource);
 
         if (namesEqual(resolvedTarget, resolvedSource)) return null;
@@ -489,6 +497,30 @@ public final class TypeChecker
         return current;
     }
 
+    /**
+     * Full chain resolution for explicit casts: unlike implicit conversions,
+     * a cast may cross any mixture of {@code alias} and (inline or distinct)
+     * {@code typedef} links (spec §2.5), e.g.
+     * {@code Errno -> inline CInt -> $typefrom(...) -> int}.
+     * Bounded and cycle-safe; returns the input when nothing resolves.
+     */
+    private static @NotNull String resolveCastType(
+            @NotNull String typeName,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        String current = typeName;
+        for (int depth = 0; depth < 6; depth++)
+        {
+            String next = resolveAlias(current, project, contextModule, 0);
+            if (next == null) next = resolveTypedef(current, project, contextModule, 0);
+            if (next == null) next = resolveInlineTypedef(current, project, contextModule, 0);
+            if (next == null || namesEqual(next, current)) return current;
+            current = next;
+        }
+        return current;
+    }
+
     private static boolean isInterfaceName(@NotNull String typeName, @NotNull Project project)
     {
         return findTypeParent(typeName, project) instanceof C3InterfaceDefinition;
@@ -565,6 +597,86 @@ public final class TypeChecker
             return false;
         }
         return false;
+    }
+
+    /**
+     * Compile-time type parameters ({@code $Type}, {@code $Foo}): abstract
+     * types provided at macro instantiation. Unknowable without expanding
+     * the call, so any conversion involving them is allowed: it is checked
+     * by the compiler per instantiation. Member access like
+     * {@code $Type.min} stays unknown (and silent) through normal inference.
+     */
+    static boolean isComptimeParam(@NotNull String typeName)
+    {
+        return COMPTIME_PARAM_PATTERN.matcher(normalize(typeName)).find();
+    }
+
+    private static final java.util.regex.Pattern COMPTIME_PARAM_PATTERN =
+        java.util.regex.Pattern.compile("\\$[A-Z]");
+
+    /**
+     * {@code void*} stays a wildcard behind {@code alias}/{@code typedef}
+     * links: when either side resolves to {@code void*}, pointer conversions
+     * apply as if it were written directly.
+     */
+    private static boolean voidStarTransparent(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull String targetText,
+            @NotNull InferredType source)
+    {
+        if (DumbService.isDumb(project)) return false;
+        String cleanTarget = stripOptional(normalize(targetText));
+        String sourceName = normalize(source.getName());
+        if (!isUserTypeName(cleanTarget) && !isUserTypeName(sourceName)) return false;
+        String resolvedTarget = resolveCastType(cleanTarget, project, contextModule);
+        String resolvedSource = resolveCastType(sourceName, project, contextModule);
+        boolean targetIsVoid = resolvedTarget.equals("void*");
+        boolean sourceIsVoid = resolvedSource.equals("void*");
+        if (!targetIsVoid && !sourceIsVoid) return false;
+        if (targetIsVoid && sourceIsVoid) return true;
+        if (targetIsVoid) return isVoidPointerCompatible(source);
+        return cleanTarget.endsWith("*");
+    }
+
+    /**
+     * Implicit conversion of a struct (or a pointer to it) to an interface
+     * it implements, e.g. {@code File*} to {@code OutStream} when declared
+     * as {@code struct File (InStream, OutStream)}. Mirrors the compiler rule
+     * behind {@code MyName a = &b;}.
+     */
+    private static boolean interfaceAssignable(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull String targetText,
+            @NotNull InferredType source)
+    {
+        if (DumbService.isDumb(project)) return false;
+        String cleanTarget = stripOptional(normalize(targetText));
+        if (!isUserTypeName(cleanTarget)) return false;
+        String resolvedIface = resolveAlias(cleanTarget, project, contextModule, 0);
+        if (resolvedIface != null) cleanTarget = stripOptional(normalize(resolvedIface));
+        if (!isInterfaceName(cleanTarget, project)) return false;
+        String structName = interfaceSourceStruct(source);
+        if (structName == null) return false;
+        String resolved = resolveAlias(structName, project, contextModule, 0);
+        if (resolved != null) structName = resolved;
+        return staticallyImplements(structName, cleanTarget, project);
+    }
+
+    /**
+     * Struct behind a pointer source for interface conversion, e.g.
+     * {@code File} for {@code File*}. Only pointers convert implicitly: a
+     * struct value would need an explicit address-of (an rvalue would
+     * otherwise dangle behind the interface reference).
+     */
+    private static @Nullable String interfaceSourceStruct(@NotNull InferredType source)
+    {
+        if (source.getKind() != InferredType.Kind.POINTER) return null;
+        String pointee = normalize(source.getName());
+        while (pointee.endsWith("*")) pointee = pointee.substring(0, pointee.length() - 1).strip();
+        if (!isUserTypeName(pointee)) return null;
+        return pointee;
     }
 
     private static boolean isSubstructOf(
@@ -832,6 +944,10 @@ public final class TypeChecker
 
         Mismatch direct = checkOnce(target, source);
         if (direct == null) return null;
+        if (isComptimeParam(target) || isComptimeParam(source.getName())) return null;
+        if (voidStarTransparent(project, contextModule, target, source)) return null;
+        if (interfaceAssignable(project, contextModule, target, source)) return null;
+        if (isComptimeNumericLenient(target, source, project, contextModule)) return null;
 
         // Resolve type aliases (and typedefs for literals / inline typedef sources).
         TargetInfo resolvedTarget = resolveTargetType(project, contextModule, target);
@@ -1177,9 +1293,171 @@ public final class TypeChecker
         if (typedefType == null) return null;
         if (typedefType.getGenericParameters() != null) return null;
         C3Type type = typedefType.getType();
-        if (type == null) return null;
+        if (type == null)
+        {
+            // Compile-time computed right-hand side, e.g.
+            // `alias CInt = $typefrom(signed_int_from_bitsize($$C_INT_SIZE));`.
+            return evaluateComptimeAlias(typedefType.getExpr());
+        }
         String text = type.getText();
         return text == null || text.isBlank() ? null : text.strip();
+    }
+
+    /**
+     * Evaluates a compile-time alias right-hand side to a concrete builtin
+     * type name. Handles the standard {@code std::core::cinterop} pattern
+     * {@code $typefrom(signed_int_from_bitsize($$C_X_SIZE))} (and the
+     * unsigned/legacy-capitalized variants), {@code $typefrom(X.typeid)}
+     * and {@code $typefrom("name")}. Anything else returns {@code null}.
+     * Pure text matching on the already-located declaration: no index access.
+     */
+    private static @Nullable String evaluateComptimeAlias(@Nullable C3Expr expr)
+    {
+        if (!(expr instanceof C3CallExpr call)) return null;
+        C3CallExprTail tail = call.getCallExprTail();
+        if (tail == null || tail.getCallInvocation() == null) return null;
+        String callee = call.getExpr().getText().strip();
+        if (!callee.equals("$typefrom") && !callee.equals("$Typefrom")) return null;
+        C3CallArgList callArgs = tail.getCallInvocation().getCallArgList();
+        C3ArgList args = callArgs != null ? callArgs.getArgList() : null;
+        if (args == null || args.getArgList().size() != 1) return null;
+        C3Expr arg = args.getArgList().get(0).getExpr();
+        if (arg == null) return null;
+        String inner = normalize(arg.getText());
+
+        java.util.regex.Matcher bitsize = BITSIZE_PATTERN.matcher(inner);
+        if (bitsize.matches())
+        {
+            boolean signed = bitsize.group(1).equals("signed");
+            int bits = cAbiBitsize(bitsize.group(2));
+            if (bits < 0) return null;
+            return signed ? SIGNED_BY_BITS.get(bits) : UNSIGNED_BY_BITS.get(bits);
+        }
+        java.util.regex.Matcher typeidAccess = TYPEID_PATTERN.matcher(inner);
+        if (typeidAccess.matches()) return typeidAccess.group(1);
+        java.util.regex.Matcher stringName = QUOTED_NAME_PATTERN.matcher(inner);
+        if (stringName.matches()) return stringName.group(1);
+        return null;
+    }
+
+    private static final java.util.regex.Pattern BITSIZE_PATTERN =
+        java.util.regex.Pattern.compile("(?:[A-Za-z_][A-Za-z_0-9]*::)*(signed|unsigned)_int_from_bitsize\\(\\$\\$C_([A-Z_]+)_SIZE\\)");
+    private static final java.util.regex.Pattern TYPEID_PATTERN =
+        java.util.regex.Pattern.compile("([A-Za-z_][A-Za-z_0-9]*(?:::[A-Za-z_][A-Za-z_0-9]*)*)\\.typeid");
+    private static final java.util.regex.Pattern QUOTED_NAME_PATTERN =
+        java.util.regex.Pattern.compile("\"([A-Za-z_][A-Za-z_0-9]*(?:::[A-Za-z_][A-Za-z_0-9]*)*)\"");
+
+    private static final java.util.Map<Integer, String> SIGNED_BY_BITS = java.util.Map.of(
+        8, "ichar", 16, "short", 32, "int", 64, "long", 128, "int128");
+    private static final java.util.Map<Integer, String> UNSIGNED_BY_BITS = java.util.Map.of(
+        8, "char", 16, "ushort", 32, "uint", 64, "ulong", 128, "uint128");
+
+    /**
+     * Bit width of a C ABI type for the compilation target. Only
+     * {@code long} differs between the data models (LP64 vs LLP64); without
+     * a project target setting the host OS decides, which matches the
+     * build host in the common case.
+     */
+    private static int cAbiBitsize(@NotNull String name)
+    {
+        return switch (name)
+        {
+            case "SHORT" -> 16;
+            case "INT" -> 32;
+            case "LONG_LONG" -> 64;
+            case "LONG" -> isWindowsHost() ? 32 : 64;
+            default -> -1;
+        };
+    }
+
+    private static boolean isWindowsHost()
+    {
+        String os = System.getProperty("os.name", "");
+        return os.toLowerCase(java.util.Locale.ROOT).contains("win");
+    }
+
+    /**
+     * Leniency for aliases with a compile-time right-hand side the evaluator
+     * could not resolve (e.g. the {@code CChar} ternary): when one side is
+     * such an alias and the other side is numeric, allow the conversion. A
+     * missed real error is preferable to blocking compilable code here.
+     */
+    private static boolean isComptimeNumericLenient(
+            @NotNull String target,
+            @NotNull InferredType source,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        String cleanTarget = normalize(target);
+        String cleanSource = normalize(source.getName());
+        boolean targetOpaque = isUnresolvedComptimeAlias(cleanTarget, project, contextModule);
+        boolean sourceOpaque = isUnresolvedComptimeAlias(cleanSource, project, contextModule);
+        if (!targetOpaque && !sourceOpaque) return false;
+        boolean targetNumeric = isIntegerName(cleanTarget) || isFloatType(cleanTarget);
+        boolean sourceNumeric = isNumericKind(source)
+            || isIntegerName(cleanSource) || isFloatType(cleanSource);
+        return (targetOpaque && sourceNumeric) || (sourceOpaque && targetNumeric);
+    }
+
+    private static boolean isUnresolvedComptimeAlias(
+            @NotNull String name,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        if (!isUserTypeName(name)) return false;
+        if (resolveAlias(name, project, contextModule, 0) != null) return false;
+        return hasComptimeAliasRhs(shortName(normalize(name)), project);
+    }
+
+    /**
+     * Whether an alias/typedef with this short name has a call-expression
+     * right-hand side that looks typeid-producing ({@code $typefrom},
+     * {@code typeid}, {@code bitsize}). Pure index scan, no resolution.
+     */
+    private static boolean hasComptimeAliasRhs(@NotNull String shortName, @NotNull Project project)
+    {
+        if (DumbService.isDumb(project)) return false;
+        try
+        {
+            for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
+            {
+                if (!key.equals(shortName) && !key.endsWith("::" + shortName)) continue;
+                for (C3PsiElement element : StubIndex.getElements(
+                        TypeIndex.KEY,
+                        key,
+                        project,
+                        C3ProjectService.getInstance(project).getSearchScope(),
+                        C3PsiElement.class))
+                {
+                    if (!(element instanceof C3TypeName typeName)) continue;
+                    if (!typeName.getText().strip().equals(shortName)) continue;
+                    PsiElement parent = typeName.getParent();
+                    C3TypedefType typedefType = null;
+                    if (parent instanceof C3AliasTypeDecl aliasDecl)
+                    {
+                        if (aliasDecl.getGenericDecl() != null) continue;
+                        typedefType = aliasDecl.getTypedefType();
+                    }
+                    else if (parent instanceof C3TypedefDecl typedefDecl)
+                    {
+                        if (typedefDecl.getGenericDecl() != null) continue;
+                        typedefType = typedefDecl.getTypedefType();
+                    }
+                    if (typedefType == null || typedefType.getGenericParameters() != null) continue;
+                    if (typedefType.getType() != null) continue;
+                    if (!(typedefType.getExpr() instanceof C3CallExpr call)) continue;
+                    String callText = call.getText().toLowerCase(java.util.Locale.ROOT);
+                    if (callText.contains("typefrom") || callText.contains("typeid") || callText.contains("bitsize"))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
     }
 
     private static boolean hasInlineModifier(@NotNull PsiElement declaration)
@@ -1773,8 +2051,19 @@ public final class TypeChecker
     {
         if (unary.getUnaryOp().getType() != null)
         {
-            // Explicit cast: (Type)expr
-            return kindOf(unary.getUnaryOp().getType().getText());
+            // Explicit cast: (Type)expr. Casting an Optional lifts to an
+            // Optional result: (T)expr? has type T?.
+            String castText = unary.getUnaryOp().getType().getText();
+            C3Expr castOperand = unary.getExpr();
+            if (castOperand != null && !isOptionalName(castText))
+            {
+                InferredType innerCast = infer(castOperand, depth + 1);
+                if (innerCast != null && isOptionalName(innerCast.getName()))
+                {
+                    return kindOf(normalize(castText) + "?");
+                }
+            }
+            return kindOf(castText);
         }
         String op = unary.getUnaryOp().getText().strip();
         if (op.equals("&&"))

@@ -157,7 +157,9 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 							{
 								return resolveBaseTypeFqn(initExpr.getType(), funcDef);
 							}
-							List<FullyQualifiedName> res = initExpr.getModuleDefinition().resolve(initExpr.getType());
+							C3ModuleDefinition initModule = initExpr.getModuleDefinition();
+							if (initModule == null) return null;
+							List<FullyQualifiedName> res = initModule.resolve(initExpr.getType());
 							if (!res.isEmpty()) return res.get(0);
 						}
 					}
@@ -199,8 +201,12 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			if (pathText.endsWith("::")) pathText = pathText.substring(0, pathText.length() - 2);
 			return new FullyQualifiedName(new ModuleName(pathText), nameIdent);
 		}
-		List<FullyQualifiedName> resolved = funcDef.getModuleDefinition().resolve(type);
-		if (!resolved.isEmpty()) return resolved.get(0);
+		C3ModuleDefinition funcModule = funcDef.getModuleDefinition();
+		if (funcModule != null)
+		{
+			List<FullyQualifiedName> resolved = funcModule.resolve(type);
+			if (!resolved.isEmpty()) return resolved.get(0);
+		}
 		return new FullyQualifiedName(funcDef.getModuleName(), nameIdent);
 	}
 
@@ -362,6 +368,7 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		{
 			C3ModuleDefinition moduleDefinition = myElement.getModuleDefinition();
 			List<C3PsiElement> result = new ArrayList<>();
+			if (moduleDefinition == null) return result;
 			for (C3FullyQualifiedNamePsiElement el :
 				NameIndexService.INSTANCE.findByNameEndsWith(myElement.getText(), myElement.getProject()))
 			{

@@ -12,13 +12,19 @@ import org.c3lang.intellij.index.InterfaceService;
 import org.c3lang.intellij.psi.C3AccessIdent;
 import org.c3lang.intellij.psi.C3Arg;
 import org.c3lang.intellij.psi.C3ArgList;
+import org.c3lang.intellij.psi.C3Attribute;
+import org.c3lang.intellij.psi.C3Attributes;
+import org.c3lang.intellij.psi.AttributeSpecs;
 import org.c3lang.intellij.psi.C3CallArgList;
 import org.c3lang.intellij.psi.C3CallExpr;
 import org.c3lang.intellij.psi.C3CallExprTail;
 import org.c3lang.intellij.psi.C3CallInvocation;
 import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3Expr;
+import org.c3lang.intellij.psi.C3ExprStmt;
 import org.c3lang.intellij.psi.C3FuncDef;
+import org.c3lang.intellij.psi.C3FuncDefinition;
+import org.c3lang.intellij.psi.C3GroupedExpr;
 import org.c3lang.intellij.psi.C3MacroDefinition;
 import org.c3lang.intellij.psi.C3MacroParams;
 import org.c3lang.intellij.psi.C3MacroDefinition;
@@ -66,6 +72,8 @@ public final class CallChecker
 
         Callee callee = resolveCallee(call, tail);
         if (callee == null || callee.callable == null) return;
+
+        checkCalleeAttributes(call, callee.callable, holder);
 
         Signature signature = buildSignature(callee.callable);
         List<ParamInfo> params = signature.params;
@@ -143,6 +151,111 @@ public final class CallChecker
         return null;
     }
 
+    // ------------------------------------------------------------------
+    // Callee attributes: deprecated use, discarded nodiscard results
+    // ------------------------------------------------------------------
+
+    private static void checkCalleeAttributes(
+            @NotNull C3CallExpr call,
+            @NotNull C3CallablePsiElement callable,
+            @NotNull AnnotationHolder holder)
+    {
+        C3Attributes attributes = attributesOf(callable);
+        if (attributes == null) return;
+        if (AttributeSpecs.hasAttribute(attributes, "deprecated") && !hasAllowDeprecated(call))
+        {
+            String message = deprecatedMessage(attributes);
+            String kind = callable instanceof C3MacroDefinition ? "macro" : "function";
+            String name = callable.getName();
+            String text = "Call to deprecated " + kind + (name != null ? " '" + name + "'" : "")
+                + (message != null && !message.isBlank() ? ": " + message : ".");
+            holder.newAnnotation(HighlightSeverity.WARNING, text).range(calleeAnchor(call)).create();
+        }
+        if (AttributeSpecs.hasAttribute(attributes, "nodiscard") && isDiscarded(call))
+        {
+            String name = callable.getName();
+            holder.newAnnotation(
+                    HighlightSeverity.WEAK_WARNING,
+                    "Return value of '" + (name != null ? name : "?") + "' must not be discarded.")
+                .range(calleeAnchor(call))
+                .create();
+        }
+    }
+
+    private static @Nullable C3Attributes attributesOf(@NotNull C3CallablePsiElement callable)
+    {
+        if (callable instanceof C3FuncDef funcDef) return funcDef.getAttributes();
+        if (callable instanceof C3MacroDefinition macro) return macro.getAttributes();
+        return null;
+    }
+
+    private static @Nullable String deprecatedMessage(@NotNull C3Attributes attributes)
+    {
+        for (C3Attribute attribute : attributes.getAttributeList())
+        {
+            String attributeName;
+            try
+            {
+                attributeName = attribute.getAttributeName().getText();
+            }
+            catch (Exception e)
+            {
+                continue;
+            }
+            if (AttributeSpecs.normalizeName(attributeName).equals("deprecated"))
+            {
+                return AttributeSpecs.firstStringArg(attribute);
+            }
+        }
+        return null;
+    }
+
+    private static boolean hasAllowDeprecated(@NotNull C3CallExpr call)
+    {
+        // The function body is a sibling of C3FuncDef under C3FuncDefinition,
+        // not a child: hop through the definition first.
+        C3FuncDefinition funcDefinition = PsiTreeUtil.getParentOfType(call, C3FuncDefinition.class);
+        if (funcDefinition != null && funcDefinition.getFuncDef() != null)
+        {
+            return AttributeSpecs.hasAttribute(funcDefinition.getFuncDef().getAttributes(), "allow_deprecated");
+        }
+        C3MacroDefinition macro = PsiTreeUtil.getParentOfType(call, C3MacroDefinition.class);
+        if (macro != null)
+        {
+            return AttributeSpecs.hasAttribute(macro.getAttributes(), "allow_deprecated");
+        }
+        return false;
+    }
+
+    private static @NotNull PsiElement calleeAnchor(@NotNull C3CallExpr call)
+    {
+        C3CallExprTail tail = call.getCallExprTail();
+        if (tail != null && tail.getAccessIdent() != null) return tail.getAccessIdent();
+        C3Expr calleeExpr = call.getExpr();
+        if (calleeExpr instanceof C3PathIdentExpr pathIdentExpr) return pathIdentExpr.getPathIdent();
+        if (calleeExpr instanceof C3PathAtIdentExpr pathAtIdentExpr) return pathAtIdentExpr.getPathAtIdent();
+        return call;
+    }
+
+    /**
+     * Whether the call result is unused: a bare statement, possibly wrapped
+     * in rethrow/force-unwrap postfixes or parentheses.
+     */
+    private static boolean isDiscarded(@NotNull C3CallExpr call)
+    {
+        PsiElement current = call;
+        while (true)
+        {
+            PsiElement parent = current.getParent();
+            if (parent instanceof C3CallExpr || parent instanceof C3GroupedExpr)
+            {
+                current = parent;
+                continue;
+            }
+            return parent instanceof C3ExprStmt;
+        }
+    }
+
     private static boolean isStaticReceiver(@Nullable C3Expr receiver)
     {
         return receiver instanceof C3TypeExpr;
@@ -160,6 +273,27 @@ public final class CallChecker
             return null;
         }
         return resolved instanceof C3CallablePsiElement callable ? callable : null;
+    }
+
+    /**
+     * Callee of a call expression, or {@code null} when it cannot be
+     * resolved. Shared by checks that need the declaration (attributes)
+     * without repeating resolution logic.
+     */
+    public static @Nullable C3CallablePsiElement resolveTarget(@NotNull C3CallExpr call)
+    {
+        C3CallExprTail tail = call.getCallExprTail();
+        if (tail == null) return null;
+        Callee callee;
+        try
+        {
+            callee = resolveCallee(call, tail);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        return callee != null ? callee.callable : null;
     }
 
     private static @Nullable C3CallablePsiElement resolveAtCallable(@NotNull C3PathAtIdent atIdent)

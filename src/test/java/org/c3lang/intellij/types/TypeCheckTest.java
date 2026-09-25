@@ -184,6 +184,71 @@ public class TypeCheckTest extends BasePlatformTestCase
             """);
     }
 
+    public void testNoreturnCallSkipsMissingReturn()
+    {
+        assertNoTypeErrors("""
+            module test;
+            struct JmpBuf { int x; }
+            macro void unreachable(String message) @noreturn
+            {
+            }
+            fn int setjmp(JmpBuf* buffer)
+            {
+                unreachable("setjmp unavailable");
+            }
+            """);
+    }
+
+    public void testNoreturnFunctionNeedsNoReturn()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn int fatal(int code) @noreturn
+            {
+                int x = code;
+            }
+            """);
+    }
+
+    public void testIfElseNoreturnSkipsMissingReturn()
+    {
+        assertNoTypeErrors("""
+            module test;
+            macro void unreachable(String message) @noreturn
+            {
+            }
+            fn int foo(int x)
+            {
+                if (x > 0)
+                {
+                    unreachable("positive");
+                }
+                else
+                {
+                    unreachable("negative");
+                }
+            }
+            """);
+    }
+
+    public void testIfWithoutElseStillNeedsReturn()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            macro void unreachable(String message) @noreturn
+            {
+            }
+            fn int foo(int x)
+            {
+                if (x > 0)
+                {
+                    unreachable("positive");
+                }
+            }
+            """), "Missing return of type 'int' in function 'foo'.");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
     public void testCastSuppressesError()
     {
         assertNoTypeErrors("""
@@ -758,6 +823,137 @@ public class TypeCheckTest extends BasePlatformTestCase
             }
             """), "Cannot pass");
         assertEquals("Expected two errors, got: " + errors, 2, errors.size());
+    }
+
+    public void testVoidPointerThroughTypedefOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            alias Vp = void*;
+            typedef Vp2 = void*;
+            fn void foo()
+            {
+                void* pr;
+                int* pr_i = pr;
+                char* pr_c = (void*)pr_i;
+                Vp v;
+                int* a = v;
+                Vp2 w;
+                int* b = w;
+                Vp2 back = pr_i;
+                Vp2 n = null;
+            }
+            """);
+    }
+
+    public void testPointerToPointerNeedsCast()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void foo()
+            {
+                void* pr;
+                int* pr_i = pr;
+                char* pr_c = pr_i;
+            }
+            """), "Cannot assign 'int*' to 'char*'.");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testIntIntoTypedefVoidPointerIsError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            typedef Vp2 = void*;
+            fn void foo()
+            {
+                Vp2 x = 5;
+            }
+            """), "Cannot assign");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testStructPointerToInterfaceOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            interface OutStream
+            {
+            }
+            struct File (OutStream)
+            {
+                int x;
+            }
+            fn File* stderr();
+            fn void foo()
+            {
+                OutStream stream = stderr();
+                File f;
+                OutStream s2 = &f;
+            }
+            """);
+    }
+
+    public void testUnrelatedPointerToInterfaceIsError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            interface OutStream
+            {
+            }
+            struct Other
+            {
+                int x;
+            }
+            fn Other* make();
+            fn void foo()
+            {
+                OutStream s = make();
+            }
+            """), "Cannot assign 'Other*' to 'OutStream'.");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testOptionalCastLiftsToOptional()
+    {
+        assertNoTypeErrors("""
+            module test;
+            faultdef SEEK_FAIL;
+            fn long? native_ftell(int file)
+            {
+                return -1;
+            }
+            fn usz? seeker(int file)
+            {
+                return (usz)native_ftell(file);
+            }
+            """);
+    }
+
+    public void testOptionalCastToPlainIsError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn long? maybe();
+            fn void foo()
+            {
+                usz x = (usz)maybe();
+            }
+            """), "Cannot assign 'usz?' to 'usz'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testLiftedCastResultIsOptional()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn long? maybe();
+            fn void foo()
+            {
+                usz x = (usz)maybe();
+            }
+            """), "Cannot assign 'usz?' to 'usz'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 
     private @NotNull List<HighlightInfo> check(@NotNull String code)
