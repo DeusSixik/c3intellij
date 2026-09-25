@@ -142,12 +142,21 @@ public final class NameIndexService
     private Collection<C3PsiElement> getElementsByName(@NotNull String string, @NotNull Project project)
     {
         if (DumbService.isDumb(project)) return Collections.emptyList();
-        return StubIndex.getElements(
-            NameIndex.KEY,
-            string,
-            project,
-            C3ProjectService.getInstance(project).getSearchScope(),
-            C3PsiElement.class
-        );
+        try
+        {
+            return StubIndex.getElements(
+                NameIndex.KEY,
+                string,
+                project,
+                C3ProjectService.getInstance(project).getSearchScope(),
+                C3PsiElement.class
+            );
+        }
+        catch (Exception ignored)
+        {
+            // Stale index entry for a file without a stub tree: degrade to
+            // empty instead of breaking highlighting/resolution.
+            return Collections.emptyList();
+        }
     }
 }

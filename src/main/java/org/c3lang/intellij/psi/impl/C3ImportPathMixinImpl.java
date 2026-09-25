@@ -209,15 +209,23 @@ public abstract class C3ImportPathMixinImpl extends C3PsiElementImpl implements 
 				C3Module direct = findModuleDirectly(targetModuleName, myElement.getProject());
 				return direct != null ? List.of(direct) : Collections.emptyList();
 			}
-			Collection<C3PsiElement> elements = StubIndex.getElements(
-				ModuleIndex.KEY,
-				targetModuleName,
-				myElement.getProject(),
-				C3ProjectService.getInstance(myElement.getProject()).getSearchScope(),
-				C3PsiElement.class)
-				.stream()
-				.filter(C3Module.class::isInstance)
-				.toList();
+			Collection<C3PsiElement> elements;
+			try
+			{
+				elements = StubIndex.getElements(
+					ModuleIndex.KEY,
+					targetModuleName,
+					myElement.getProject(),
+					C3ProjectService.getInstance(myElement.getProject()).getSearchScope(),
+					C3PsiElement.class)
+					.stream()
+					.filter(C3Module.class::isInstance)
+					.toList();
+			}
+			catch (Exception ignored)
+			{
+				elements = List.of();
+			}
 
 			if (!elements.isEmpty())
 			{

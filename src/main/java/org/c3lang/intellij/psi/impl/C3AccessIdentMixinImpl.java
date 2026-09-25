@@ -6,6 +6,7 @@ import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiReference;
 import com.intellij.psi.impl.source.tree.LeafPsiElement;
 import com.intellij.psi.util.PsiTreeUtil;
+import org.c3lang.intellij.index.InterfaceService;
 import org.c3lang.intellij.index.NameIndexService;
 import org.c3lang.intellij.index.StructService;
 import org.c3lang.intellij.psi.*;
@@ -174,9 +175,28 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			// cover the same cases safely.
 			Collection<C3CallablePsiElement> methods =
 				NameIndexService.INSTANCE.findMethodsForType(currentType, ident, myElement.getProject());
-			if (!methods.isEmpty())
+			// An interface receiver dispatches to its own methods first: they
+			// are the contract the call is written against. Concrete
+			// implementations (possibly with extra parameters) follow.
+			List<C3CallablePsiElement> preferred = new ArrayList<>();
+			List<C3CallablePsiElement> rest = new ArrayList<>();
+			boolean receiverIsInterface = InterfaceService.isInterfaceType(currentType, myElement.getProject());
+			for (C3CallablePsiElement method : methods)
 			{
-				return new ArrayList<>(methods);
+				if (receiverIsInterface && InterfaceService.getDeclaringInterface(method) != null)
+				{
+					preferred.add(method);
+				}
+				else
+				{
+					rest.add(method);
+				}
+			}
+			if (!preferred.isEmpty() || !rest.isEmpty())
+			{
+				List<C3PsiElement> ordered = new ArrayList<>(preferred);
+				ordered.addAll(rest);
+				return ordered;
 			}
 
 			if (currentType.getModule() != null)

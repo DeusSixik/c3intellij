@@ -142,6 +142,33 @@ public class TypeCheckTest extends BasePlatformTestCase
         assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 
+    public void testReturnVoidCallInVoidOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void inner(int x)
+            {
+            }
+            fn void outer()
+            {
+                return inner(1);
+            }
+            """);
+    }
+
+    public void testReturnOptionalInVoidIsError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn int? maybe();
+            fn void foo()
+            {
+                return maybe();
+            }
+            """), "Cannot return a value from a void function.");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
     public void testMissingReturnIsError()
     {
         List<HighlightInfo> errors = errorsWithText(check("""

@@ -91,6 +91,8 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			funcDef = PsiTreeUtil.getParentOfType(this, C3FuncDef.class);
 		}
 
+		C3MacroDefinition macroDefinition = PsiTreeUtil.getParentOfType(this, C3MacroDefinition.class);
+
 		if (funcDef != null)
 		{
 			if ("this".equals(myName) || "self".equals(myName))
@@ -138,6 +140,20 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			}
 		}
 
+		if (macroDefinition != null && macroDefinition.getMacroParams().getParameterList() != null)
+		{
+			for (C3ParamDecl paramDecl : macroDefinition.getMacroParams().getParameterList().getParamDeclList())
+			{
+				C3Parameter macroParam = paramDecl.getParameter();
+				if (macroParam == null) continue;
+				if (myName.equals(macroParam.getNameIdent()) || myName.equals(macroParam.getName()))
+				{
+					C3Type type = macroParam.getType();
+					if (type != null) return macroParamTypeFqn(type, macroDefinition);
+				}
+			}
+		}
+
 		C3CompoundStatement compoundStatement =
 			PsiTreeUtil.getParentOfType(this, C3CompoundStatement.class);
 		if (compoundStatement != null)
@@ -172,6 +188,21 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 
 	private static @Nullable FullyQualifiedName resolveBaseTypeFqn(@NotNull C3Type type, @NotNull C3FuncDef funcDef)
 	{
+		C3ModuleDefinition funcModule = funcDef.getModuleDefinition();
+		ModuleName fallback = funcDef.getModuleName();
+		return resolveBaseTypeFqn(type, funcModule, fallback);
+	}
+
+	private static @Nullable FullyQualifiedName macroParamTypeFqn(@NotNull C3Type type, @NotNull C3MacroDefinition macro)
+	{
+		return resolveBaseTypeFqn(type, macro.getModuleDefinition(), ModuleName.from(macro));
+	}
+
+	private static @Nullable FullyQualifiedName resolveBaseTypeFqn(
+			@NotNull C3Type type,
+			@Nullable C3ModuleDefinition moduleDefinition,
+			@Nullable ModuleName fallbackModule)
+	{
 		C3BaseType baseType = type.getBaseType();
 		if (baseType.isPrimitiveType()) return null;
 		PsiReference ref = baseType.getReference();
@@ -201,36 +232,61 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			if (pathText.endsWith("::")) pathText = pathText.substring(0, pathText.length() - 2);
 			return new FullyQualifiedName(new ModuleName(pathText), nameIdent);
 		}
-		C3ModuleDefinition funcModule = funcDef.getModuleDefinition();
-		if (funcModule != null)
+		if (moduleDefinition != null)
 		{
-			List<FullyQualifiedName> resolved = funcModule.resolve(type);
+			List<FullyQualifiedName> resolved = moduleDefinition.resolve(type);
 			if (!resolved.isEmpty()) return resolved.get(0);
 		}
-		return new FullyQualifiedName(funcDef.getModuleName(), nameIdent);
+		return new FullyQualifiedName(fallbackModule, nameIdent);
 	}
 
 	@Override
 	public @NotNull List<C3LocalDeclAfterType> findLocalDeclAfterType()
 	{
-		C3CompoundStatement compoundStatement =
+		C3CompoundStatement scope =
 			PsiTreeUtil.getParentOfType(this, C3CompoundStatement.class);
-		if (compoundStatement == null) return Collections.emptyList();
-
-		Collection<C3LocalDeclAfterType> all =
-			PsiTreeUtil.collectElementsOfType(compoundStatement, C3LocalDeclAfterType.class);
-		C3LocalDeclAfterType best = null;
-		for (C3LocalDeclAfterType decl : all)
+		while (scope != null)
 		{
-			if (decl.getTextOffset() < getTextOffset()
-				&& decl.getNameIdent() != null
-				&& decl.getNameIdent().equals(getNameIdent())
-				&& (best == null || decl.getTextOffset() > best.getTextOffset()))
+			// Nearest declaration visible from here: an inner block shadows
+			// the outer ones, and within one block the last declaration
+			// before the use wins.
+			C3LocalDeclAfterType best = null;
+			for (C3LocalDeclAfterType decl : PsiTreeUtil.findChildrenOfType(scope, C3LocalDeclAfterType.class))
 			{
-				best = decl;
+				if (!PsiTreeUtil.isAncestor(scope, decl, false)) continue;
+				if (!isVisibleFrom(decl)) continue;
+				if (decl.getTextOffset() < getTextOffset()
+					&& decl.getNameIdent() != null
+					&& decl.getNameIdent().equals(getNameIdent())
+					&& (best == null || decl.getTextOffset() > best.getTextOffset()))
+				{
+					best = decl;
+				}
 			}
+			if (best != null) return Collections.singletonList(best);
+			scope = PsiTreeUtil.getParentOfType(scope, C3CompoundStatement.class);
 		}
-		return best != null ? Collections.singletonList(best) : Collections.emptyList();
+		return Collections.emptyList();
+	}
+
+	/**
+	 * A declaration is visible from this use when no nested block boundary
+	 * sits between them, unless the use itself is inside that nested block.
+	 * In other words: the declaration's innermost owning block must also own
+	 * (or be) the use, or own an ancestor of the use.
+	 */
+	private boolean isVisibleFrom(@NotNull C3LocalDeclAfterType decl)
+	{
+		C3CompoundStatement declScope =
+			PsiTreeUtil.getParentOfType(decl, C3CompoundStatement.class);
+		if (declScope == null) return true;
+		PsiElement current = this;
+		while (current != null && current != declScope)
+		{
+			current = current.getParent();
+		}
+		if (current == null) return false;
+		return decl.getTextOffset() < getTextOffset();
 	}
 
 
@@ -308,24 +364,8 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		@Override
 		public @NotNull Collection<C3PsiElement> multiResolve()
 		{
-			C3CompoundStatement compoundStatement =
-				PsiTreeUtil.getParentOfType(myElement, C3CompoundStatement.class);
-			if (compoundStatement == null) return Collections.emptyList();
-
-			Collection<C3LocalDeclAfterType> all =
-				PsiTreeUtil.collectElementsOfType(compoundStatement, C3LocalDeclAfterType.class);
-			C3LocalDeclAfterType best = null;
-			for (C3LocalDeclAfterType decl : all)
-			{
-				if (decl.getTextOffset() < myElement.getTextOffset()
-					&& decl.getNameIdent() != null
-					&& decl.getNameIdent().equals(myElement.getNameIdent())
-					&& (best == null || decl.getTextOffset() > best.getTextOffset()))
-				{
-					best = decl;
-				}
-			}
-			return best != null ? Collections.singletonList(best) : Collections.emptyList();
+			if (!(myElement instanceof C3PathIdentMixinImpl mixin)) return Collections.emptyList();
+			return new ArrayList<>(mixin.findLocalDeclAfterType());
 		}
 	}
 

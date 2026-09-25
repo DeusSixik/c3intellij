@@ -95,15 +95,23 @@ public abstract class C3PathMixinImpl extends C3PsiNamedElementImpl implements C
 			if (moduleName.isEmpty()) return Collections.emptyList();
 			if (com.intellij.openapi.project.DumbService.isDumb(myElement.getProject())) return Collections.emptyList();
 
-			Collection<C3PsiElement> elements = StubIndex.getElements(
-				ModuleIndex.KEY,
-				moduleName,
-				myElement.getProject(),
-				C3ProjectService.getInstance(myElement.getProject()).getSearchScope(),
-				C3PsiElement.class)
-				.stream()
-				.filter(C3Module.class::isInstance)
-				.toList();
+			Collection<C3PsiElement> elements;
+			try
+			{
+				elements = StubIndex.getElements(
+					ModuleIndex.KEY,
+					moduleName,
+					myElement.getProject(),
+					C3ProjectService.getInstance(myElement.getProject()).getSearchScope(),
+					C3PsiElement.class)
+					.stream()
+					.filter(C3Module.class::isInstance)
+					.toList();
+			}
+			catch (Exception ignored)
+			{
+				elements = List.of();
+			}
 
 			if (!elements.isEmpty()) return elements;
 

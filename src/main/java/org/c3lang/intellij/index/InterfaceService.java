@@ -40,6 +40,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
 /**
@@ -189,10 +190,32 @@ public final class InterfaceService
     }
 
     /**
+     * Whether the name resolves to an interface definition (rather than a
+     * struct with the same name).
+     */
+    public static boolean isInterfaceType(@NotNull FullyQualifiedName type, @NotNull Project project)
+    {
+        if (DumbService.isDumb(project)) return false;
+        try
+        {
+            return !INSTANCE.findInterfaceDefinitions(type, project).isEmpty();
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    /**
      * The interface a method is declared in, or {@code null} for regular
      * functions and struct methods. Uses the direct parent on purpose:
      * it is cheap on stub-based PSI (no AST loading).
      */
+    public static @Nullable C3InterfaceDefinition getDeclaringInterface(@NotNull C3CallablePsiElement callable)
+    {
+        if (callable instanceof C3FuncDef funcDef) return getDeclaringInterface(funcDef);
+        return null;
+    }
     public static @Nullable C3InterfaceDefinition getDeclaringInterface(@NotNull C3FuncDef funcDef)
     {
         PsiElement parent = funcDef.getParent();
@@ -552,12 +575,22 @@ public final class InterfaceService
         for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
         {
             if (!key.equals(query) && !key.endsWith("::" + query)) continue;
-            for (C3PsiElement element : StubIndex.getElements(
+            Collection<C3PsiElement> elements;
+            try
+            {
+                elements = StubIndex.getElements(
                     TypeIndex.KEY,
                     key,
                     project,
                     C3ProjectService.getInstance(project).getSearchScope(),
-                    C3PsiElement.class))
+                    C3PsiElement.class);
+            }
+            catch (Exception ignored)
+            {
+                // Stale index entry for a file without a stub tree.
+                continue;
+            }
+            for (C3PsiElement element : elements)
             {
                 if (!(element instanceof C3TypeName typeName)) continue;
                 PsiElement parent = typeName.getParent();

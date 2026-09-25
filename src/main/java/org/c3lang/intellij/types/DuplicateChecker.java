@@ -25,6 +25,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 
@@ -193,12 +194,24 @@ public final class DuplicateChecker
             : module.getValue() + "::" + implName;
         if (DumbService.isDumb(project)) return result;
         if (!StubIndex.getInstance().getAllKeys(NameIndex.KEY, project).contains(selfKey)) return result;
-        for (C3PsiElement element : StubIndex.getElements(
+        Collection<C3PsiElement> elements;
+        try
+        {
+            elements = StubIndex.getElements(
                 NameIndex.KEY,
                 selfKey,
                 project,
                 C3ProjectService.getInstance(project).getSearchScope(),
-                C3PsiElement.class))
+                C3PsiElement.class);
+        }
+        catch (Exception ignored)
+        {
+            // Stale index entry for a file without a stub tree (e.g. indexed
+            // as plain text before C3 association): degrade to no duplicates
+            // instead of breaking highlighting.
+            return result;
+        }
+        for (C3PsiElement element : elements)
         {
             if (isMacro && !(element instanceof C3MacroDefinition other)) continue;
             if (!isMacro && !(element instanceof C3FuncDef other)) continue;

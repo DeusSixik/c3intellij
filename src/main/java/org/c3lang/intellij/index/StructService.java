@@ -12,6 +12,7 @@ import org.c3lang.intellij.psi.FullyQualifiedName;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
 public final class StructService
@@ -46,12 +47,22 @@ public final class StructService
     private List<C3StructMemberDeclaration> getStructMembersByExactKey(@NotNull String key, @NotNull Project project)
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
-        for (C3PsiElement element : StubIndex.getElements(
+        Collection<C3PsiElement> elements;
+        try
+        {
+            elements = StubIndex.getElements(
                 StructMemberDeclarationIndex.KEY,
                 key,
                 project,
                 C3ProjectService.getInstance(project).getSearchScope(),
-                C3PsiElement.class))
+                C3PsiElement.class);
+        }
+        catch (Exception ignored)
+        {
+            // Stale index entry for a file without a stub tree.
+            return result;
+        }
+        for (C3PsiElement element : elements)
         {
             if (element instanceof C3StructMemberDeclaration declaration)
             {

@@ -837,9 +837,16 @@ public class C3Annotator implements Annotator
         }
         if (TypeChecker.isVoidType(returnText))
         {
-            holder.newAnnotation(HighlightSeverity.ERROR, "Cannot return a value from a void function.")
-                .range(expr)
-                .create();
+            // `return voidExpr;` just forwards control (the callee returns
+            // nothing either); only a real value is an error here. Unknown
+            // expressions stay silent.
+            InferredType source = TypeChecker.infer(expr);
+            if (source != null && source.getKind() != InferredType.Kind.VOID)
+            {
+                holder.newAnnotation(HighlightSeverity.ERROR, "Cannot return a value from a void function.")
+                    .range(expr)
+                    .create();
+            }
             return;
         }
         String error = TypeChecker.returnError(ret.getProject(), ModuleName.from(ret), returnText, TypeChecker.infer(expr));

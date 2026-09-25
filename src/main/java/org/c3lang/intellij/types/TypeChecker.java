@@ -70,6 +70,7 @@ import org.jetbrains.annotations.Nullable;
 
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -553,12 +554,7 @@ public final class TypeChecker
         for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
         {
             if (!key.equals(wanted) && !key.endsWith("::" + wanted)) continue;
-            for (C3PsiElement element : StubIndex.getElements(
-                    TypeIndex.KEY,
-                    key,
-                    project,
-                    C3ProjectService.getInstance(project).getSearchScope(),
-                    C3PsiElement.class))
+            for (C3PsiElement element : safeElements(TypeIndex.KEY, key, project))
             {
                 if (!(element instanceof C3TypeName typeNameElement)) continue;
                 if (!typeNameElement.getText().strip().equals(wanted)) continue;
@@ -575,6 +571,31 @@ public final class TypeChecker
             }
         }
         return null;
+    }
+
+    /**
+     * Index lookup that tolerates stale entries for files without a stub
+     * tree (e.g. indexed as plain text before C3 association): degrades to
+     * empty instead of throwing into highlighting.
+     */
+    static @NotNull Collection<C3PsiElement> safeElements(
+            @NotNull com.intellij.psi.stubs.StubIndexKey<String, C3PsiElement> key,
+            @NotNull String indexKey,
+            @NotNull Project project)
+    {
+        try
+        {
+            return StubIndex.getElements(
+                key,
+                indexKey,
+                project,
+                C3ProjectService.getInstance(project).getSearchScope(),
+                C3PsiElement.class);
+        }
+        catch (Exception ignored)
+        {
+            return List.of();
+        }
     }
 
     private static boolean staticallyImplements(
@@ -865,12 +886,7 @@ public final class TypeChecker
         for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
         {
             if (!key.equals(shortName) && !key.endsWith("::" + shortName)) continue;
-            for (C3PsiElement element : StubIndex.getElements(
-                    TypeIndex.KEY,
-                    key,
-                    project,
-                    C3ProjectService.getInstance(project).getSearchScope(),
-                    C3PsiElement.class))
+            for (C3PsiElement element : safeElements(TypeIndex.KEY, key, project))
             {
                 if (!(element instanceof C3TypeName typeName)) continue;
                 if (!typeName.getText().strip().equals(shortName)) continue;
@@ -1254,12 +1270,7 @@ public final class TypeChecker
         for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
         {
             if (!key.equals(shortName) && !key.endsWith("::" + shortName)) continue;
-            for (C3PsiElement element : StubIndex.getElements(
-                    TypeIndex.KEY,
-                    key,
-                    project,
-                    C3ProjectService.getInstance(project).getSearchScope(),
-                    C3PsiElement.class))
+            for (C3PsiElement element : safeElements(TypeIndex.KEY, key, project))
             {
                 if (!(element instanceof C3TypeName typeName)) continue;
                 PsiElement parent = typeName.getParent();
@@ -1422,12 +1433,7 @@ public final class TypeChecker
             for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
             {
                 if (!key.equals(shortName) && !key.endsWith("::" + shortName)) continue;
-                for (C3PsiElement element : StubIndex.getElements(
-                        TypeIndex.KEY,
-                        key,
-                        project,
-                        C3ProjectService.getInstance(project).getSearchScope(),
-                        C3PsiElement.class))
+                for (C3PsiElement element : safeElements(TypeIndex.KEY, key, project))
                 {
                     if (!(element instanceof C3TypeName typeName)) continue;
                     if (!typeName.getText().strip().equals(shortName)) continue;
