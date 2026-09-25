@@ -651,4 +651,44 @@ public class C3CompletionTest extends BasePlatformTestCase
 			lookupStrings.contains("normalize"));
 		assertTrue("Should suggest 'lerp', got: " + lookupStrings, lookupStrings.contains("lerp"));
 	}
+
+	public void testArrayLenCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			fn void main()
+			{
+				int[4] arr = { 1, 2, 3, 4 };
+				arr.<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'len', got: " + lookupStrings, lookupStrings.contains("len"));
+		assertTrue("Should not suggest 'ptr' for arrays, got: " + lookupStrings,
+			!lookupStrings.contains("ptr"));
+	}
+
+	public void testSliceLenPtrCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			fn void test()
+			{
+				int[4] arr = { 1, 2, 3, 4 };
+				int[] slice = &arr;
+				slice.<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'len', got: " + lookupStrings, lookupStrings.contains("len"));
+		assertTrue("Should suggest 'ptr' for slices, got: " + lookupStrings, lookupStrings.contains("ptr"));
+	}
 }

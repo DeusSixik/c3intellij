@@ -363,6 +363,8 @@ public final class TypeChecker
             return new Mismatch(source.getName(), targetName, null, null, -1, -1);
         }
 
+        if (arrayPointerCompatible(base, source)) return null;
+
         VectorInfo targetVector = parseVector(base);
         if (targetVector != null)
         {
@@ -648,6 +650,77 @@ public final class TypeChecker
         return inline != null;
     }
 
+    /**
+     * Array/slice/pointer conversions from {@code docs/arrays.md} (same element type required):
+     * <ul>
+     * <li>{@code T[]} accepts {@code T[]} and {@code T[N]*}</li>
+     * <li>{@code T*} accepts {@code T[]}, {@code T[N]*} and {@code T*}</li>
+     * <li>{@code T[N]*} accepts {@code T[M]*} with equal size</li>
+     * </ul>
+     * Fixed arrays never convert implicitly; anything else needs an explicit cast.
+     */
+    private static boolean arrayPointerCompatible(@NotNull String base, @NotNull InferredType source)
+    {
+        String sourceName = source.getName();
+        if (isVectorName(base) || isVectorName(sourceName)) return false;
+
+        boolean targetSlice = isSliceName(base);
+        boolean targetPtr = isPlainPointerName(base);
+        VectorInfo targetArrayPtr = parseArrayPointer(base);
+        if (!targetSlice && !targetPtr && targetArrayPtr == null) return false;
+
+        boolean sourceSlice = isSliceName(sourceName);
+        boolean sourcePtr = isPlainPointerName(sourceName);
+        VectorInfo sourceArrayPtr = parseArrayPointer(sourceName);
+        if (!sourceSlice && !sourcePtr && sourceArrayPtr == null) return false;
+
+        String targetElement = targetSlice || targetPtr ? sliceOrPointerElement(base) : targetArrayPtr.element;
+        String sourceElement = sourceSlice || sourcePtr ? sliceOrPointerElement(sourceName) : sourceArrayPtr.element;
+        if (targetElement == null || sourceElement == null || !namesEqual(targetElement, sourceElement)) return false;
+
+        if (targetSlice) return true;
+        if (targetPtr) return true;
+        // T[N]* <- T[M]* requires equal sizes (textual or numeric);
+        // slices and plain pointers need an explicit cast here.
+        if (sourceArrayPtr == null) return false;
+        return targetArrayPtr.sizeText.equals(sourceArrayPtr.sizeText)
+            || (targetArrayPtr.size >= 0 && targetArrayPtr.size == sourceArrayPtr.size);
+    }
+
+    private static boolean isSliceName(@NotNull String typeText)
+    {
+        String clean = normalize(typeText);
+        return clean.endsWith("[]");
+    }
+
+    private static boolean isPlainPointerName(@NotNull String typeText)
+    {
+        String clean = normalize(typeText);
+        return clean.endsWith("*") && !clean.endsWith("**") && parseArrayPointer(clean) == null;
+    }
+
+    private static @Nullable String sliceOrPointerElement(@NotNull String typeText)
+    {
+        String clean = normalize(typeText);
+        if (clean.endsWith("[]")) return clean.substring(0, clean.length() - 2);
+        if (clean.endsWith("*") && !clean.endsWith("**"))
+        {
+            String element = clean.substring(0, clean.length() - 1).strip();
+            return element.isEmpty() ? null : element;
+        }
+        return null;
+    }
+
+    private static @Nullable VectorInfo parseArrayPointer(@NotNull String typeText)
+    {
+        // An array pointer `T[N]*`: array with a trailing star (but not a plain `T*`).
+        String clean = normalize(typeText);
+        if (!clean.endsWith("*") || clean.endsWith("**")) return null;
+        VectorInfo array = parseArray(clean.substring(0, clean.length() - 1));
+        if (array == null || array.size < 0) return null;
+        return array;
+    }
+
     // ------------------------------------------------------------------
     // Vectors, arrays and initializer lists
     // ------------------------------------------------------------------
@@ -661,11 +734,27 @@ public final class TypeChecker
     {
         public final @NotNull String element;
         public final long size;
+        public final @NotNull String sizeText;
 
-        VectorInfo(@NotNull String element, long size)
+        VectorInfo(@NotNull String element, long size, @NotNull String sizeText)
         {
             this.element = element;
             this.size = size;
+            this.sizeText = sizeText;
+        }
+    }
+
+    private static long parseSize(@NotNull String sizeText)
+    {
+        if (sizeText.isEmpty() || sizeText.equals("*")) return -1;
+        try
+        {
+            long size = Long.parseLong(sizeText);
+            return size < 0 ? -1 : size;
+        }
+        catch (NumberFormatException e)
+        {
+            return -2;
         }
     }
 
@@ -675,8 +764,9 @@ public final class TypeChecker
         if (!matcher.matches()) return null;
         String element = matcher.group(1);
         if (element.isEmpty()) return null;
-        String size = matcher.group(2);
-        return new VectorInfo(element, size.equals("*") ? -1 : Long.parseLong(size));
+        long size = parseSize(matcher.group(2));
+        if (size < -1) return null;
+        return new VectorInfo(element, size, matcher.group(2));
     }
 
     public static boolean isIntegerType(@NotNull String typeText)
@@ -689,6 +779,24 @@ public final class TypeChecker
         return FLOAT_TYPES.containsKey(shortName(normalize(typeText)));
     }
 
+    /**
+     * Element type of an array or slice ({@code int} for {@code int[4]},
+     * {@code int[*]} and {@code int[]}), or {@code null}.
+     */
+    public static @Nullable String arrayElementType(@NotNull String typeText)
+    {
+        String clean = normalize(typeText);
+        if (clean.endsWith("[]")) return clean.substring(0, clean.length() - 2);
+        VectorInfo array = parseArray(clean);
+        return array != null ? array.element : null;
+    }
+
+    public static boolean isSliceType(@NotNull String typeText)
+    {
+        String clean = normalize(typeText);
+        return clean.endsWith("[]");
+    }
+
     private static boolean isVectorName(@NotNull String typeText)
     {
         return VECTOR_PATTERN.matcher(normalize(typeText)).matches();
@@ -696,12 +804,13 @@ public final class TypeChecker
 
     private static @Nullable VectorInfo parseArray(@NotNull String typeText)
     {
-        java.util.regex.Matcher matcher = ARRAY_PATTERN.matcher(typeText);
+        java.util.regex.Matcher matcher = ARRAY_PATTERN.matcher(normalize(typeText));
         if (!matcher.matches()) return null;
         String element = matcher.group(1);
         if (element.isEmpty()) return null;
-        String size = matcher.group(2);
-        return new VectorInfo(element, size.isEmpty() || size.equals("*") ? -1 : Long.parseLong(size));
+        long size = parseSize(matcher.group(2));
+        if (size < -1) return null;
+        return new VectorInfo(element, size, matcher.group(2));
     }
 
     private static @Nullable Mismatch checkInitList(
@@ -757,10 +866,12 @@ public final class TypeChecker
             return base.matches("(i)?char\\[(\\d*|\\*)\\]");
         }
         String name = source.getName();
-        return (name.equals("String") && (base.equals("String") || base.equals("char[]")))
-            || (name.equals("char[]") && (base.equals("String") || base.equals("char[]")))
-            || (name.equals("ZString") && (base.equals("ZString") || base.equals("char*")))
-            || (name.equals("char*") && (base.equals("ZString") || base.equals("char*")));
+        String baseSlice = base.equals("char[*]") ? "char[]" : (base.equals("ichar[*]") ? "ichar[]" : base);
+        String nameSlice = name.equals("char[*]") ? "char[]" : (name.equals("ichar[*]") ? "ichar[]" : name);
+        return (nameSlice.equals("String") && (baseSlice.equals("String") || baseSlice.equals("char[]")))
+            || (nameSlice.equals("char[]") && (baseSlice.equals("String") || baseSlice.equals("char[]")))
+            || (nameSlice.equals("ZString") && (baseSlice.equals("ZString") || baseSlice.equals("char*")))
+            || (nameSlice.equals("char*") && (baseSlice.equals("ZString") || baseSlice.equals("char*")));
     }
 
     private static boolean intAssignable(@NotNull String base, @NotNull InferredType source)

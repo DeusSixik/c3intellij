@@ -509,6 +509,59 @@ public class TypeCheckTest extends BasePlatformTestCase
         assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 
+    public void testSliceConversionsOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void test()
+            {
+                int[4] arr = { 1, 2, 3, 4 };
+                int[4]* ptr = &arr;
+                int[] slice1 = &arr;
+                int[] slice2 = ptr;
+                int[] slice3 = slice1;
+                int* int_ptr = slice1;
+            }
+            """);
+    }
+
+    public void testArrayDoesNotDecayOk()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void test()
+            {
+                int[3] x = { 1, 2, 3 };
+                int[] s = x;
+            }
+            """), "Cannot assign");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testArrayPointerNeedsCastIsError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void test()
+            {
+                int* p;
+                int[4]* ap = p;
+            }
+            """), "Cannot assign");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testWildcardArrayInitOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void foo()
+            {
+                int[*] b = { 4, 5, 6 };
+            }
+            """);
+    }
+
     private @NotNull List<HighlightInfo> check(@NotNull String code)
     {
         myFixture.configureByText("main.c3", code);

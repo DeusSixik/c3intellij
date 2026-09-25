@@ -87,6 +87,10 @@ public final class TailExprCompletionContributor extends CompletionProvider<Comp
 				{
 					return;
 				}
+				if (addArrayCompletions(receiverType, scopedResult))
+				{
+					return;
+				}
 			}
 		}
 
@@ -212,6 +216,39 @@ public final class TailExprCompletionContributor extends CompletionProvider<Comp
 		String declared = TypeChecker.declaredTypeText(resolved);
 		if (declared == null) return null;
 		return declared;
+	}
+
+	/**
+	 * Adds {@code .len} for arrays and slices (plus {@code .ptr} for slices,
+	 * see {@code docs/arrays.md}).
+	 *
+	 * @return true when the receiver is an array or slice and normal struct
+	 * lookup must be skipped.
+	 */
+	private static boolean addArrayCompletions(
+			@NotNull String receiverType,
+			@NotNull CompletionResultSet scopedResult)
+	{
+		String element = TypeChecker.arrayElementType(receiverType);
+		if (element == null || element.isEmpty()) return false;
+
+		scopedResult.addElement(PrioritizedLookupElement.withPriority(
+			LookupElementBuilder.create("len")
+				.withPresentableText("len")
+				.withIcon(C3Icons.Nodes.STRUCT_FIELD)
+				.withTypeText("sz"),
+			5.0));
+
+		if (TypeChecker.isSliceType(receiverType))
+		{
+			scopedResult.addElement(PrioritizedLookupElement.withPriority(
+				LookupElementBuilder.create("ptr")
+					.withPresentableText("ptr")
+					.withIcon(C3Icons.Nodes.STRUCT_FIELD)
+					.withTypeText(element + "*"),
+				5.0));
+		}
+		return true;
 	}
 
 	/**
