@@ -90,20 +90,6 @@ public abstract class C3BaseTypeMixinImpl extends C3PsiNamedElementImpl implemen
 			String nameIdent = myElement.getNameIdent();
 			if (nameIdent == null) return result;
 
-			boolean searchCurrentFile = myElement.getPath() == null
-				|| (importProvider.getModuleName() != null
-					&& myElement.getPath().getText().equals(importProvider.getModuleName().getValue() + "::"));
-			if (searchCurrentFile)
-			{
-				for (C3TypeName typeName : PsiTreeUtil.findChildrenOfType(myElement.getContainingFile(), C3TypeName.class))
-				{
-					if (nameIdent.equals(typeName.getNameIdent()) && !result.contains(typeName))
-					{
-						result.add(0, typeName);
-					}
-				}
-			}
-
 			for (C3FullyQualifiedNamePsiElement el :
 				NameIndexService.INSTANCE.findType(myElement, myElement.getProject()))
 			{
@@ -123,6 +109,8 @@ public abstract class C3BaseTypeMixinImpl extends C3PsiNamedElementImpl implemen
 
 			if (result.isEmpty())
 			{
+				// Module-file fallback for unindexed types: reads the module file
+				// found by path instead of forcing a full PSI walk over it.
 				List<String> modulesToSearch = new ArrayList<>();
 				for (ModuleName mn : importProvider.getImports())
 				{
@@ -135,17 +123,23 @@ public abstract class C3BaseTypeMixinImpl extends C3PsiNamedElementImpl implemen
 
 				for (String modName : modulesToSearch)
 				{
-					C3Module mod = C3ImportPathMixinImpl.findModuleDirectly(modName, myElement.getProject());
-					if (mod != null)
+					for (C3TypeName typeName :
+						org.c3lang.intellij.index.InterfaceService.INSTANCE.findModuleTypeDeclarations(
+							modName, myElement.getProject()))
 					{
-						for (C3TypeName typeName : PsiTreeUtil.findChildrenOfType(mod.getContainingFile(), C3TypeName.class))
+						if (modName.equals("std::core")
+							&& importProvider.getModuleName() != null
+							&& typeName.getModuleName() != null
+							&& !typeName.getModuleName().getValue().startsWith("std::"))
 						{
-							if (nameIdent.equals(typeName.getNameIdent()) && !result.contains(typeName))
-							{
-								result.add(typeName);
-							}
+							continue;
+						}
+						if (nameIdent.equals(typeName.getNameIdent()) && !result.contains(typeName))
+						{
+							result.add(typeName);
 						}
 					}
+					if (!result.isEmpty()) break;
 				}
 			}
 

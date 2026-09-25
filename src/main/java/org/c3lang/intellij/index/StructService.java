@@ -1,5 +1,6 @@
 package org.c3lang.intellij.index;
 
+import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
 import com.intellij.psi.stubs.StubIndex;
 import kotlin.Pair;
@@ -25,6 +26,7 @@ public final class StructService
     public List<C3StructMemberDeclaration> getStructMembers(@NotNull String query, @NotNull Project project)
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
+        if (DumbService.isDumb(project)) return result;
         // Never call StubIndex.getElements() with a key that is not in the index:
         // it logs "Stub ids not found for key" (see StubProcessingHelper).
         // The query may be short ("MyTr.a") while index keys are fully
@@ -63,6 +65,7 @@ public final class StructService
     public List<C3StructMemberDeclaration> findStructMembers(@NotNull String query, @NotNull Project project)
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
+        if (DumbService.isDumb(project)) return result;
         String shortQuery = stripModule(query);
         for (String key : StubIndex.getInstance().getAllKeys(StructMemberDeclarationIndex.KEY, project))
         {
@@ -81,6 +84,7 @@ public final class StructService
     public List<C3StructMemberDeclaration> findStructMembersByName(@NotNull String name, @NotNull Project project)
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
+        if (DumbService.isDumb(project)) return result;
         String suffix = "." + name;
         for (String key : StubIndex.getInstance().getAllKeys(StructMemberDeclarationIndex.KEY, project))
         {
@@ -169,6 +173,7 @@ public final class StructService
     public List<C3StructMemberDeclaration> findStructMemberFields(@NotNull String query, @NotNull Project project)
     {
         List<C3StructMemberDeclaration> result = new ArrayList<>();
+        if (DumbService.isDumb(project)) return result;
         String prefix = query + ".";
         String shortPrefix = stripModule(query) + ".";
         for (String key : StubIndex.getInstance().getAllKeys(StructMemberDeclarationIndex.KEY, project))

@@ -19,6 +19,7 @@ import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.util.ProcessingContext;
 import org.c3lang.intellij.C3Icons;
 import org.c3lang.intellij.C3Util;
+import org.c3lang.intellij.index.InterfaceService;
 import org.c3lang.intellij.index.NameIndex;
 import org.c3lang.intellij.intention.AddImportQuickFix;
 import org.c3lang.intellij.project.C3ProjectService;
@@ -74,6 +75,7 @@ public final class TypeCompletionContributor extends CompletionProvider<Completi
             @NotNull ProcessingContext context,
             @NotNull CompletionResultSet result)
     {
+        if (com.intellij.openapi.project.DumbService.isDumb(parameters.getPosition().getProject())) return;
         if (!PATTERN.accepts(parameters.getPosition()) && !PATTERN.accepts(parameters.getOriginalPosition()))
         {
             return;
@@ -204,6 +206,7 @@ public final class TypeCompletionContributor extends CompletionProvider<Completi
             for (String modName : targetModules)
             {
                 String modulePrefix = modName + "::";
+                int addedBefore = addedTypeFqns.size();
                 for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
                 {
                     if (!key.startsWith(modulePrefix)) continue;
@@ -230,6 +233,12 @@ public final class TypeCompletionContributor extends CompletionProvider<Completi
 
                         scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 10.0));
                     }
+                }
+                if (addedTypeFqns.size() == addedBefore)
+                {
+                    // The index has no types for this module (stale or broken index):
+                    // read the module file directly so qualified completion keeps working.
+                    addModuleFileTypes(project, modName, modulePrefix, scopedResult, addedTypeFqns);
                 }
             }
         }
@@ -264,6 +273,33 @@ public final class TypeCompletionContributor extends CompletionProvider<Completi
                     scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 8.0));
                 }
             }
+        }
+    }
+
+    private static void addModuleFileTypes(
+            @NotNull com.intellij.openapi.project.Project project,
+            @NotNull String modName,
+            @NotNull String modulePrefix,
+            @NotNull CompletionResultSet scopedResult,
+            @NotNull Set<String> addedTypeFqns)
+    {
+        for (C3TypeName typeName : InterfaceService.INSTANCE.findModuleTypeDeclarations(modName, project))
+        {
+            FullyQualifiedName fqName = typeName.getFqName();
+            if (!fqName.getFullName().startsWith(modulePrefix)) continue;
+            String remainder = fqName.getFullName().substring(modulePrefix.length());
+            if (remainder.contains("::")) continue;
+            String name = fqName.getName();
+            if (name == null || name.isEmpty()) continue;
+            if (!addedTypeFqns.add(fqName.getFullName())) continue;
+
+            Icon icon = iconFor(typeName.getTypeEnum());
+            LookupElementBuilder builder = LookupElementBuilder.create(typeName, name)
+                .withIcon(icon)
+                .withPresentableText(name)
+                .withTypeText(modName);
+
+            scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 10.0));
         }
     }
 

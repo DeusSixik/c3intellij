@@ -9,6 +9,7 @@ import com.intellij.psi.PsiComment;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiWhiteSpace;
 import org.c3lang.intellij.psi.*;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
@@ -133,7 +134,7 @@ public final class DocCommentAnnotator
 		}
 
 		Pattern pattern = Pattern.compile(
-				"@param\\s+((\\[(in|&in|out|&out|inout|&inout|own|&own|init|&init|drop|&drop)])\\s+)?(([$#])?\\w+)(\\s+:\\s+(\"((?:[^\"\\\\]|\\\\.)*)\"|`((?:[^`\\\\]|\\\\.)*)`))?");
+				"@param\\s+((\\[(in|&in|out|&out|inout|&inout|own|&own|init|&init|drop|&drop)])\\s+)?(([$#&])?\\w+)(\\s+:\\s+(\"((?:[^\"\\\\]|\\\\.)*)\"|`((?:[^`\\\\]|\\\\.)*)`))?");
 		String commentText = element.getText();
 		int commentStart = element.getTextRange().getStartOffset();
 
@@ -156,7 +157,7 @@ public final class DocCommentAnnotator
 
 			if (name != null)
 			{
-				if (!args.contains(name))
+				if (!args.contains(name) && !args.contains(stripParamPrefix(name)))
 				{
 					TextRange range = TextRange.create(commentStart + matcher.start(), commentStart + matcher.end());
 					holder.newAnnotation(HighlightSeverity.ERROR, "There is no argument named '" + name + "' in this " + (is_function ? "function." : "macro.")).range(range).create();
@@ -166,6 +167,13 @@ public final class DocCommentAnnotator
 			}
 		}
 	}
+	private static @NotNull String stripParamPrefix(@NotNull String name)
+	{
+		int index = 0;
+		while (index < name.length() && "#$&".indexOf(name.charAt(index)) >= 0) index++;
+		return name.substring(index);
+	}
+
 	private static void mark(AnnotationHolder holder, int start, int end, TextAttributesKey highlight)
 	{
 		TextRange nameRange = TextRange.create(start, end);

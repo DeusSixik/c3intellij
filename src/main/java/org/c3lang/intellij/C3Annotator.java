@@ -472,6 +472,11 @@ public class C3Annotator implements Annotator
         else if (psiElement instanceof C3MacroDefinition macroDef)
         {
             DuplicateChecker.checkMacro(macroDef, annotationHolder);
+            annotateMacroDefinition(macroDef, annotationHolder);
+        }
+        else if (psiElement instanceof C3UnaryExpr unaryExpr)
+        {
+            annotateCast(unaryExpr, annotationHolder);
         }
     }
 
@@ -594,6 +599,48 @@ public class C3Annotator implements Annotator
         if (!taken.contains("self")) return "self";
         if (!taken.contains("this")) return "this";
         return "self_";
+    }
+
+    private void annotateMacroDefinition(@NotNull C3MacroDefinition macroDef, @NotNull AnnotationHolder holder)
+    {
+        String name = macroDef.getName();
+        if (name == null || name.isEmpty() || name.charAt(0) == '@') return;
+        C3MacroParams params = macroDef.getMacroParams();
+        if (params == null || params.getParameterList() == null) return;
+        for (C3ParamDecl decl : params.getParameterList().getParamDeclList())
+        {
+            C3Parameter parameter = decl.getParameter();
+            if (parameter == null) continue;
+            String text = parameter.getText();
+            if (text == null) continue;
+            String clean = text.strip();
+            if (clean.startsWith("&") || clean.startsWith("#"))
+            {
+                PsiElement anchor = macroDef.getNameIdentifier() != null ? macroDef.getNameIdentifier() : macroDef;
+                holder.newAnnotation(
+                        HighlightSeverity.ERROR,
+                        "Macro '" + name + "' uses reference/expression parameters and must have a name starting with '@'.")
+                    .range(anchor)
+                    .create();
+                return;
+            }
+        }
+    }
+
+    private void annotateCast(@NotNull C3UnaryExpr unary, @NotNull AnnotationHolder holder)
+    {
+        C3UnaryOp op = unary.getUnaryOp();
+        C3Type castType = op.getType();
+        if (castType == null) return;
+        if (DumbService.isDumb(unary.getProject())) return;
+        C3Expr operand = unary.getExpr();
+        if (operand == null) return;
+        InferredType source = TypeChecker.infer(operand);
+        TypeChecker.CastDiagnostic diagnostic = TypeChecker.checkCast(
+            unary.getProject(), ModuleName.from(unary), castType.getText(), source, operand);
+        if (diagnostic == null) return;
+        HighlightSeverity severity = diagnostic.warning ? HighlightSeverity.WEAK_WARNING : HighlightSeverity.ERROR;
+        holder.newAnnotation(severity, diagnostic.message).range(op).create();
     }
 
     private void annotateInterfaceImpl(@NotNull C3InterfaceImpl impl, @NotNull AnnotationHolder holder)

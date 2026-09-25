@@ -6,15 +6,20 @@ import com.intellij.psi.PsiElement;
 import com.intellij.psi.stubs.StubIndex;
 import com.intellij.psi.util.PsiTreeUtil;
 import org.c3lang.intellij.project.C3ProjectService;
+import org.c3lang.intellij.psi.C3AliasTypeDecl;
 import org.c3lang.intellij.psi.C3Attribute;
 import org.c3lang.intellij.psi.C3Attributes;
 import org.c3lang.intellij.psi.C3BitstructDeclaration;
+import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3EnumDeclaration;
 import org.c3lang.intellij.psi.C3FuncDef;
+import org.c3lang.intellij.psi.C3FuncDefinition;
 import org.c3lang.intellij.psi.C3InterfaceBody;
 import org.c3lang.intellij.psi.C3InterfaceDefinition;
 import org.c3lang.intellij.psi.C3InterfaceImpl;
 import org.c3lang.intellij.psi.C3MacroDefinition;
+import org.c3lang.intellij.psi.C3Module;
+import org.c3lang.intellij.psi.C3ModuleSection;
 import org.c3lang.intellij.psi.C3ParamDecl;
 import org.c3lang.intellij.psi.C3Parameter;
 import org.c3lang.intellij.psi.C3ParameterList;
@@ -29,6 +34,7 @@ import org.c3lang.intellij.psi.FullyQualifiedName;
 import org.c3lang.intellij.psi.ModuleName;
 import org.c3lang.intellij.psi.ParamType;
 import org.c3lang.intellij.psi.ShortType;
+import org.c3lang.intellij.psi.impl.C3ImportPathMixinImpl;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -356,6 +362,160 @@ public final class InterfaceService
             result.add(interfaceMethod);
         }
         return result;
+    }
+
+    /**
+     * Type declarations read directly from the module file (struct, union, enum,
+     * bitstruct, interface, typedef, alias). Used as a fallback when the stub
+     * index has no types for the module.
+     */
+    @NotNull
+    public List<C3TypeName> findModuleTypeDeclarations(@NotNull String moduleName, @NotNull Project project)
+    {
+        List<C3TypeName> result = new ArrayList<>();
+        if (DumbService.isDumb(project)) return result;
+        for (com.intellij.psi.PsiFile file : findModuleFiles(moduleName, project))
+        {
+            addTypeNames(result, PsiTreeUtil.findChildrenOfType(file, C3StructDeclaration.class), moduleName);
+            addTypeNames(result, PsiTreeUtil.findChildrenOfType(file, C3EnumDeclaration.class), moduleName);
+            addTypeNames(result, PsiTreeUtil.findChildrenOfType(file, C3BitstructDeclaration.class), moduleName);
+            addTypeNames(result, PsiTreeUtil.findChildrenOfType(file, C3InterfaceDefinition.class), moduleName);
+            addTypeNames(result, PsiTreeUtil.findChildrenOfType(file, C3TypedefDecl.class), moduleName);
+            addTypeNames(result, PsiTreeUtil.findChildrenOfType(file, C3AliasTypeDecl.class), moduleName);
+        }
+        return result;
+    }
+
+    private static <T extends C3PsiElement> void addTypeNames(
+            @NotNull List<C3TypeName> result,
+            @NotNull java.util.Collection<T> declarations,
+            @NotNull String moduleName)
+    {
+        for (T declaration : declarations)
+        {
+            C3TypeName typeName = null;
+            if (declaration instanceof C3StructDeclaration struct) typeName = struct.getTypeName();
+            else if (declaration instanceof C3EnumDeclaration enumDecl) typeName = enumDecl.getTypeName();
+            else if (declaration instanceof C3BitstructDeclaration bitstruct) typeName = bitstruct.getTypeName();
+            else if (declaration instanceof C3InterfaceDefinition iface) typeName = iface.getTypeName();
+            else if (declaration instanceof C3TypedefDecl typedef) typeName = typedef.getTypeName();
+            else if (declaration instanceof C3AliasTypeDecl alias) typeName = alias.getTypeName();
+            if (typeName == null || result.contains(typeName)) continue;
+            ModuleName declarantModule = ModuleName.from(typeName);
+            if (declarantModule == null || !declarantModule.getValue().equals(moduleName)) continue;
+            result.add(typeName);
+        }
+    }
+
+    /**
+     * Top-level functions and macros read directly from the module file.
+     * Used as a fallback when the stub index has no callables for the module.
+     */
+    @NotNull
+    public List<C3CallablePsiElement> findModuleCallables(@NotNull String moduleName, @NotNull Project project)
+    {
+        List<C3CallablePsiElement> result = new ArrayList<>();
+        if (DumbService.isDumb(project)) return result;
+        for (com.intellij.psi.PsiFile file : findModuleFiles(moduleName, project))
+        {
+            for (C3FuncDefinition definition : PsiTreeUtil.findChildrenOfType(file, C3FuncDefinition.class))
+            {
+                if (!moduleName.equals(moduleOf(definition))) continue;
+                C3FuncDef funcDef = definition.getFuncDef();
+                if (funcDef != null && !result.contains(funcDef))
+                {
+                    result.add(funcDef);
+                }
+            }
+            for (C3MacroDefinition macro : PsiTreeUtil.findChildrenOfType(file, C3MacroDefinition.class))
+            {
+                if (!moduleName.equals(moduleOf(macro))) continue;
+                if (!result.contains(macro)) result.add(macro);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Files conventionally belonging to a module: the single module file plus,
+     * for umbrella modules like {@code std::io}, the files directly in the
+     * module directory that declare the same module. Loaded without forcing
+     * stub/AST reconciliation of unrelated files.
+     */
+    private static @NotNull List<com.intellij.psi.PsiFile> findModuleFiles(
+            @NotNull String moduleName,
+            @NotNull Project project)
+    {
+        List<com.intellij.psi.PsiFile> result = new ArrayList<>();
+        String relativePath = moduleName.replace("::", "/");
+        List<String> candidates = new ArrayList<>();
+        candidates.add(relativePath + ".c3");
+        candidates.add(relativePath + ".c3i");
+        if (relativePath.startsWith("std/"))
+        {
+            candidates.add(relativePath.substring(4) + ".c3");
+            candidates.add(relativePath.substring(4) + ".c3i");
+        }
+        com.intellij.openapi.vfs.LocalFileSystem lfs = com.intellij.openapi.vfs.LocalFileSystem.getInstance();
+        com.intellij.psi.PsiManager psiManager = com.intellij.psi.PsiManager.getInstance(project);
+        List<String> stdlibPaths = DumbService.isDumb(project)
+            ? org.c3lang.intellij.project.C3ProjectService.getInstance(project).getKnownStdlibPaths()
+            : org.c3lang.intellij.project.C3ProjectService.getInstance(project).getStdlibPaths();
+        for (String stdlibPath : stdlibPaths)
+        {
+            for (String relPath : candidates)
+            {
+                com.intellij.openapi.vfs.VirtualFile vf = lfs.findFileByPath(stdlibPath + "/" + relPath);
+                if (vf == null || !vf.isValid()) continue;
+                com.intellij.psi.PsiFile psi = psiManager.findFile(vf);
+                if (psi instanceof org.c3lang.intellij.psi.C3File && !result.contains(psi))
+                {
+                    result.add(psi);
+                }
+            }
+            // Umbrella module (e.g. std::io spans io.c3, stream.c3, ...):
+            // same-directory files declaring exactly this module.
+            com.intellij.openapi.vfs.VirtualFile dir = lfs.findFileByPath(stdlibPath + "/" + relativePath);
+            if (dir == null || !dir.isValid() || !dir.isDirectory()) continue;
+            for (com.intellij.openapi.vfs.VirtualFile child : dir.getChildren())
+            {
+                if (child.isDirectory()) continue;
+                String ext = child.getExtension();
+                if (!"c3".equals(ext) && !"c3i".equals(ext)) continue;
+                com.intellij.psi.PsiFile psi = psiManager.findFile(child);
+                if (!(psi instanceof org.c3lang.intellij.psi.C3File) || result.contains(psi)) continue;
+                for (PsiElement top : psi.getChildren())
+                {
+                    if (!(top instanceof C3ModuleSection section)) continue;
+                    ModuleName declared = section.getModuleName();
+                    if (declared != null && declared.getValue().equals(moduleName))
+                    {
+                        result.add(psi);
+                        break;
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    /**
+     * The conventional single file for a module ({@code a/b.c3} for {@code a::b}),
+     * loaded without forcing stub/AST reconciliation of unrelated files.
+     * Returns {@code null} when the conventional file is absent.
+     */
+    private static @Nullable com.intellij.psi.PsiFile findSingleModuleFile(
+            @NotNull String moduleName,
+            @NotNull Project project)
+    {
+        List<com.intellij.psi.PsiFile> files = findModuleFiles(moduleName, project);
+        return files.isEmpty() ? null : files.get(0);
+    }
+
+    private static @Nullable String moduleOf(@NotNull C3PsiElement element)
+    {
+        ModuleName moduleName = ModuleName.from(element);
+        return moduleName != null ? moduleName.getValue() : null;
     }
 
     /**

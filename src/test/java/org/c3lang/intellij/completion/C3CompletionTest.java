@@ -691,4 +691,57 @@ public class C3CompletionTest extends BasePlatformTestCase
 		assertTrue("Should suggest 'len', got: " + lookupStrings, lookupStrings.contains("len"));
 		assertTrue("Should suggest 'ptr' for slices, got: " + lookupStrings, lookupStrings.contains("ptr"));
 	}
+
+	public void testTypingStdScopeShowsModules()
+	{
+		myFixture.configureByText("collections.c3", """
+			module std::collections;
+			""");
+
+		myFixture.configureByText("main.c3", """
+			module testproject;
+
+			fn void main()
+			{
+				<caret>
+			}
+			""");
+
+		myFixture.type("std::");
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Typing 'std::' should show a lookup, got null", lookupStrings);
+		assertTrue("Should suggest 'collections', got: " + lookupStrings, lookupStrings.contains("collections"));
+	}
+	public void testNestedImportedFieldCompletion()
+	{
+		myFixture.configureByText("other.c3", """
+			module other;
+
+			struct File
+			{
+				int handle;
+			}
+			""");
+
+		myFixture.configureByText("main.c3", """
+			module test;
+			import other;
+
+			struct Holder
+			{
+				other::File f;
+			}
+
+			fn void caller(Holder h)
+			{
+				h.f.<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest imported field 'handle', got: " + lookupStrings, lookupStrings.contains("handle"));
+	}
 }

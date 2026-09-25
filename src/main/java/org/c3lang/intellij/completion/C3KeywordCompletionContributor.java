@@ -25,7 +25,7 @@ public final class C3KeywordCompletionContributor extends CompletionProvider<Com
 
 	public static final List<String> PRIMITIVE_TYPES = List.of(
 		"void", "bool", "char", "double", "float", "float16", "bfloat16",
-		"int128", "ichar", "int", "iptr", "sz", "long", "short",
+		"int128", "ichar", "int", "iptr", "sz", "isz", "long", "short",
 		"uint128", "uint", "ulong", "uptr", "ushort", "usz",
 		"float128", "any", "fault", "typeid"
 	);

@@ -1163,6 +1163,7 @@ public class C3Parser implements PsiParser, LightPsiParser {
   //     | KW_IPTR
   //     | KW_UPTR
   //     | KW_SZ
+  //     | KW_ISZ
   //     | KW_UNTYPEDLIST
   //     | KW_USZ
   //     | KW_FAULT
@@ -1184,6 +1185,7 @@ public class C3Parser implements PsiParser, LightPsiParser {
     if (!r) r = consumeToken(b, KW_IPTR);
     if (!r) r = consumeToken(b, KW_UPTR);
     if (!r) r = consumeToken(b, KW_SZ);
+    if (!r) r = consumeToken(b, KW_ISZ);
     if (!r) r = consumeToken(b, KW_UNTYPEDLIST);
     if (!r) r = consumeToken(b, KW_USZ);
     if (!r) r = consumeToken(b, KW_FAULT);
@@ -3891,7 +3893,7 @@ public class C3Parser implements PsiParser, LightPsiParser {
   //     | KW_CT_VAARG | KW_VOID | KW_BOOL
   //     | KW_CHAR | KW_ICHAR | KW_SHORT | KW_USHORT | KW_INT | KW_UINT | KW_LONG
   //     | KW_ULONG | KW_UINT128 | KW_INT128 | KW_BFLOAT16 | KW_DOUBLE | KW_FLOAT | KW_FLOAT16
-  //     | KW_FLOAT128 | KW_UPTR | KW_IPTR | KW_USZ | KW_SZ | KW_UNTYPEDLIST
+  //     | KW_FLOAT128 | KW_UPTR | KW_IPTR | KW_USZ | KW_SZ | KW_ISZ | KW_UNTYPEDLIST
   static boolean keyword_list(PsiBuilder b, int l) {
     if (!recursion_guard_(b, l, "keyword_list")) return false;
     boolean r;
@@ -3986,6 +3988,8 @@ public class C3Parser implements PsiParser, LightPsiParser {
     if (!r) r = consumeToken(b, KW_IPTR);
     if (!r) r = consumeToken(b, KW_USZ);
     if (!r) r = consumeToken(b, KW_SZ);
+    if (!r) r = consumeToken(b, KW_ISZ);
+    if (!r) r = consumeToken(b, KW_ISZ);
     if (!r) r = consumeToken(b, KW_UNTYPEDLIST);
     return r;
   }

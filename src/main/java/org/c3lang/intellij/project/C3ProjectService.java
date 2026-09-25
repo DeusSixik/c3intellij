@@ -30,6 +30,7 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 	private @Nullable C3ProjectModel model;
 	private @Nullable String projectJsonPath;
 	private long projectJsonModificationStamp = -1;
+	private volatile @Nullable List<String> fallbackStdlibPaths;
 
 	public C3ProjectService(@NotNull Project project)
 	{
@@ -168,15 +169,41 @@ public final class C3ProjectService implements PersistentStateComponent<C3Projec
 	{
 		try
 		{
-			return collectStdlibPaths(true);
+			List<String> paths = collectStdlibPaths(true);
+			if (!paths.isEmpty()) return paths;
 		}
 		catch (Exception e)
 		{
 			// This getter is called from stub building and reference resolution,
 			// which run on indexing threads: it must never throw.
 			LOG.debug("Unable to resolve C3 stdlib paths", e);
-			return Collections.emptyList();
 		}
+		return getFallbackStdlibPaths();
+	}
+
+	/**
+	 * Last-resort stdlib detection that does not touch (possibly broken) settings:
+	 * locates the compiler on PATH/well-known paths and asks it for the stdlib.
+	 * Cached in memory; never throws. Without this, broken settings would leave
+	 * the stdlib unindexed and module completion (e.g. {@code std::}) empty.
+	 */
+	private @NotNull List<String> getFallbackStdlibPaths()
+	{
+		List<String> cached = fallbackStdlibPaths;
+		if (cached != null) return cached;
+		try
+		{
+			String detected = org.c3lang.intellij.C3CompilerDetector.detectStdlibPath(
+				org.c3lang.intellij.C3CompilerDetector.findCompilerExecutable(""));
+			String clean = org.c3lang.intellij.C3StdLibRootsProvider.normalizePath(detected);
+			cached = clean != null ? List.of(clean) : Collections.emptyList();
+		}
+		catch (Exception ignored)
+		{
+			cached = Collections.emptyList();
+		}
+		fallbackStdlibPaths = cached;
+		return cached;
 	}
 
 	/**

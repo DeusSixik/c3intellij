@@ -55,6 +55,7 @@ public final class TailExprCompletionContributor extends CompletionProvider<Comp
 		@NotNull ProcessingContext context,
 		@NotNull CompletionResultSet result)
 	{
+		if (com.intellij.openapi.project.DumbService.isDumb(parameters.getPosition().getProject())) return;
 		if (!PATTERN.accepts(parameters.getPosition()) && !PATTERN.accepts(parameters.getOriginalPosition()))
 		{
 			return;
@@ -75,7 +76,7 @@ public final class TailExprCompletionContributor extends CompletionProvider<Comp
 		String prefix = lastDot >= 0 ? lookupString.substring(lastDot + 1) : "";
 		CompletionResultSet scopedResult = result.withPrefixMatcher(prefix);
 
-		List<String> idents = List.of(lookupString.substring(lookupString.indexOf('.') + 1).split("\\."));
+		List<String> idents = List.of(lookupString.substring(lookupString.indexOf('.') + 1).split("\\.", -1));
 
 		if (idents.size() == 1)
 		{

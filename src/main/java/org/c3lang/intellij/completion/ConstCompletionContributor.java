@@ -57,6 +57,7 @@ public final class ConstCompletionContributor extends CompletionProvider<Complet
             @NotNull ProcessingContext context,
             @NotNull CompletionResultSet result)
     {
+        if (com.intellij.openapi.project.DumbService.isDumb(parameters.getPosition().getProject())) return;
         if (!PATTERN.accepts(parameters.getPosition()) && !PATTERN.accepts(parameters.getOriginalPosition()))
         {
             return;

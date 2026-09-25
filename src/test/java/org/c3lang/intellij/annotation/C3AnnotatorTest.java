@@ -166,6 +166,25 @@ public class C3AnnotatorTest extends BasePlatformTestCase
 		assertEquals("Expected one empty-struct error, got: " + errors, 1, errors.size());
 	}
 
+	public void testFileWithoutModuleDoesNotCrashIndexing()
+	{
+		myFixture.configureByText("main.c3", """
+			struct Foo
+			{
+				int x;
+			}
+			fn void foo()
+			{
+				Foo f;
+				f.x = 1;
+			}
+			""");
+
+		// Must not throw (e.g. in stub building) and must not report stub errors.
+		List<HighlightInfo> highlights = myFixture.doHighlighting();
+		assertNotNull(highlights);
+	}
+
 	public void testCorrectInterfaceImplHasNoErrors()
 	{
 		myFixture.configureByText("main.c3", """

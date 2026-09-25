@@ -5,6 +5,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.PsiManager;
 import com.intellij.psi.PsiReference;
@@ -60,10 +61,13 @@ public abstract class C3ImportPathMixinImpl extends C3PsiElementImpl implements 
 		PsiManager psiManager = PsiManager.getInstance(project);
 		LocalFileSystem lfs = LocalFileSystem.getInstance();
 		// This helper runs from reference resolution, which can happen while
-		// building stubs on an indexing thread: use only already-known stdlib
-		// paths (no compiler detection, no settings writes) and never trigger
-		// a synchronous VFS refresh in dumb mode.
+		// building stubs on an indexing thread: in dumb mode use only already-known
+		// stdlib paths (no compiler detection, no settings writes) and never trigger
+		// a synchronous VFS refresh.
 		boolean dumb = com.intellij.openapi.project.DumbService.isDumb(project);
+		List<String> stdlibPaths = dumb
+			? C3ProjectService.getInstance(project).getKnownStdlibPaths()
+			: C3ProjectService.getInstance(project).getStdlibPaths();
 
 		String relativePath = moduleName.replace("::", "/");
 		List<String> candidateRelPaths = new ArrayList<>();
@@ -75,7 +79,7 @@ public abstract class C3ImportPathMixinImpl extends C3PsiElementImpl implements 
 			candidateRelPaths.add(relativePath.substring(4) + ".c3i");
 		}
 
-		for (String stdlibPath : C3ProjectService.getInstance(project).getKnownStdlibPaths())
+		for (String stdlibPath : stdlibPaths)
 		{
 			for (String relPath : candidateRelPaths)
 			{
@@ -84,23 +88,28 @@ public abstract class C3ImportPathMixinImpl extends C3PsiElementImpl implements 
 				if (vf == null && !dumb) vf = lfs.refreshAndFindFileByPath(fullPath);
 				if (vf != null && vf.isValid())
 				{
-					PsiFile psi = psiManager.findFile(vf);
-					if (psi instanceof C3File)
-					{
-						for (C3Module mod : PsiTreeUtil.findChildrenOfType(psi, C3Module.class))
-						{
-							ModuleName mn = mod.getModuleName();
-							if (mn != null && moduleName.equals(mn.getValue()))
-							{
-								return mod;
-							}
-						}
-					}
+					C3Module mod = findModuleInSingleFile(vf, moduleName, psiManager);
+					if (mod != null) return mod;
 				}
 			}
 		}
 
-		for (String stdlibPath : C3ProjectService.getInstance(project).getKnownStdlibPaths())
+		// Full stdlib scan is a last resort: it walks every file's PSI and can
+		// trigger stub/AST reconciliation on unrelated files (UpToDateStubIndexMismatch).
+		String singleRoot = singleConventionalRoot(moduleName, stdlibPaths);
+		if (singleRoot != null)
+		{
+			VirtualFile root = lfs.findFileByPath(singleRoot);
+			if (root == null && !dumb) root = lfs.refreshAndFindFileByPath(singleRoot);
+			if (root != null && root.isValid())
+			{
+				C3Module match = findModuleInVirtualFile(root, moduleName, psiManager);
+				if (match != null) return match;
+			}
+			return null;
+		}
+
+		for (String stdlibPath : stdlibPaths)
 		{
 			VirtualFile root = lfs.findFileByPath(stdlibPath);
 			if (root == null && !dumb) root = lfs.refreshAndFindFileByPath(stdlibPath);
@@ -111,6 +120,55 @@ public abstract class C3ImportPathMixinImpl extends C3PsiElementImpl implements 
 			}
 		}
 
+		return null;
+	}
+
+	/**
+	 * Reads only the header (module declaration) of a single file. Unlike a full
+	 * PSI walk this does not force stub/AST reconciliation of unrelated content.
+	 */
+	private static @Nullable C3Module findModuleInSingleFile(
+			@NotNull VirtualFile file,
+			@NotNull String moduleName,
+			@NotNull PsiManager psiManager)
+	{
+		String ext = file.getExtension();
+		if (!"c3".equals(ext) && !"c3i".equals(ext)) return null;
+		PsiFile psi = psiManager.findFile(file);
+		if (!(psi instanceof C3File c3File)) return null;
+		for (PsiElement child : c3File.getChildren())
+		{
+			if (child instanceof C3Module direct)
+			{
+				ModuleName mn = direct.getModuleName();
+				if (mn != null && moduleName.equals(mn.getValue()))
+				{
+					return direct;
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Conventional module root for multi-segment names, e.g. {@code std/os/linux}
+	 * for {@code std::os::linux}, when it exists. Narrows the fallback scan to a
+	 * single directory instead of the whole stdlib.
+	 */
+	private static @Nullable String singleConventionalRoot(
+			@NotNull String moduleName,
+			@NotNull List<String> stdlibPaths)
+	{
+		int firstSeparator = moduleName.indexOf("::");
+		int lastSeparator = moduleName.lastIndexOf("::");
+		if (firstSeparator < 0 || firstSeparator == lastSeparator) return null;
+		String dirPath = moduleName.substring(0, lastSeparator).replace("::", "/");
+		for (String stdlibPath : stdlibPaths)
+		{
+			String candidate = stdlibPath + "/" + dirPath;
+			VirtualFile vf = LocalFileSystem.getInstance().findFileByPath(candidate);
+			if (vf != null && vf.isValid() && vf.isDirectory()) return candidate;
+		}
 		return null;
 	}
 
@@ -129,18 +187,8 @@ public abstract class C3ImportPathMixinImpl extends C3PsiElementImpl implements 
 		String ext = file.getExtension();
 		if ("c3".equals(ext) || "c3i".equals(ext))
 		{
-			PsiFile psi = psiManager.findFile(file);
-			if (psi instanceof C3File)
-			{
-				for (C3Module mod : PsiTreeUtil.findChildrenOfType(psi, C3Module.class))
-				{
-					ModuleName mn = mod.getModuleName();
-					if (mn != null && moduleName.equals(mn.getValue()))
-					{
-						return mod;
-					}
-				}
-			}
+			C3Module mod = findModuleInSingleFile(file, moduleName, psiManager);
+			if (mod != null) return mod;
 		}
 		return null;
 	}

@@ -168,17 +168,10 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 				@NotNull FullyQualifiedName currentType,
 				@NotNull String ident)
 		{
-			for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(myElement.getContainingFile(), C3FuncDef.class))
-			{
-				if (funcDef.getType() != null && currentType.getSuffixName().equals(funcDef.getType().getValue()))
-				{
-					if (funcDef.getFqName().getName().endsWith("." + ident))
-					{
-						return List.of(funcDef);
-					}
-				}
-			}
-
+			// Cross-file PSI scans are intentionally NOT done here: forcing AST/stub
+			// reconciliation of unrelated files from a resolver causes
+			// UpToDateStubIndexMismatch. The stub index + module-file fallback below
+			// cover the same cases safely.
 			Collection<C3CallablePsiElement> methods =
 				NameIndexService.INSTANCE.findMethodsForType(currentType, ident, myElement.getProject());
 			if (!methods.isEmpty())
@@ -189,7 +182,8 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			if (currentType.getModule() != null)
 			{
 				C3Module mod = C3ImportPathMixinImpl.findModuleDirectly(currentType.getModule().getValue(), myElement.getProject());
-				if (mod != null)
+				if (mod != null && mod.getContainingFile() != null
+					&& mod.getContainingFile().equals(myElement.getContainingFile()))
 				{
 					for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(mod.getContainingFile(), C3FuncDef.class))
 					{
@@ -212,6 +206,7 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			if (name == null) return Collections.emptyList();
 
 			List<C3PsiElement> result = new ArrayList<>();
+			// Same-file scan is safe; cross-file lookup goes through the index below.
 			for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(myElement.getContainingFile(), C3FuncDef.class))
 			{
 				if (funcDef.getFqName().getName().endsWith("." + name) && !result.contains(funcDef))

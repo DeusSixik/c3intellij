@@ -2,6 +2,7 @@ package org.c3lang.intellij.psi;
 
 import com.intellij.lang.ASTNode;
 import com.intellij.psi.tree.TokenSet;
+import com.intellij.psi.util.PsiTreeUtil;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -34,7 +35,7 @@ public final class StructField
 
     public static @NotNull List<StructField> collectFields(@NotNull C3StructBody body, @Nullable String parentName)
     {
-        C3ModuleDefinition module = body.getModuleDefinition();
+        C3ModuleDefinition module = PsiTreeUtil.getParentOfType(body, C3ModuleDefinition.class);
         List<StructField> result = new ArrayList<>();
 
         for (C3StructMemberDeclaration declaration : body.getStructMemberDeclarationList())
@@ -64,21 +65,11 @@ public final class StructField
                 C3Type type = declaration.getType();
                 if (type == null) return List.of();
 
-                FullyQualifiedName typeFqn;
-                if (com.intellij.openapi.project.DumbService.isDumb(body.getProject()))
-                {
-                    // collectFields runs during stub creation, i.e. while indexing
-                    // (dumb mode). References and stub indices must not be touched
-                    // here, so resolve purely syntactically to keep stubs deterministic.
-                    typeFqn = syntacticTypeName(module, type);
-                }
-                else
-                {
-                    List<FullyQualifiedName> resolved = module.resolve(type);
-                    typeFqn = resolved.size() == 1
-                        ? resolved.get(0)
-                        : new FullyQualifiedName(null, type.getText());
-                }
+                // Stub creation must never touch references or stub indices
+                // (the file being indexed may itself be mapped in the index),
+                // so resolve purely syntactically. Downstream lookups match by
+                // suffix, so module imprecision here is harmless.
+                FullyQualifiedName typeFqn = syntacticTypeName(module, type);
 
                 if (memberName != null)
                 {
@@ -99,14 +90,15 @@ public final class StructField
         return children.length > 0 ? children[0].getText() : null;
     }
 
-    private static @NotNull FullyQualifiedName syntacticTypeName(
-            @NotNull C3ModuleDefinition module,
+    public static @NotNull FullyQualifiedName syntacticTypeName(
+            @Nullable C3ModuleDefinition module,
             @NotNull C3Type type)
     {
         C3BaseType baseType = type.getBaseType();
         if (baseType != null && baseType.getPath() == null)
         {
-            return new FullyQualifiedName(module.getModuleName(), baseType.getText());
+            ModuleName moduleName = module != null ? module.getModuleName() : null;
+            return new FullyQualifiedName(moduleName, baseType.getText());
         }
         return new FullyQualifiedName(null, type.getText());
     }

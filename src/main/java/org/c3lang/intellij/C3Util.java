@@ -149,6 +149,7 @@ public final class C3Util
     public @NotNull Set<String> findC3ModulesStartingWith(@NotNull Project project, @NotNull String prefix)
     {
         Set<String> modules = new HashSet<>();
+        if (com.intellij.openapi.project.DumbService.isDumb(project)) return modules;
 
         try
         {

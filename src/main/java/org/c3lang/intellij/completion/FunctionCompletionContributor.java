@@ -81,6 +81,7 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
             @NotNull ProcessingContext context,
             @NotNull CompletionResultSet result)
     {
+        if (com.intellij.openapi.project.DumbService.isDumb(parameters.getPosition().getProject())) return;
         if (!PATTERN.accepts(parameters.getPosition()) && !PATTERN.accepts(parameters.getOriginalPosition()))
         {
             return;
@@ -143,6 +144,7 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
             for (String modName : targetModules)
             {
                 String modulePrefix = modName + "::";
+                int addedCallables = 0;
                 for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
                 {
                     if (!key.startsWith(modulePrefix)) continue;
@@ -161,39 +163,9 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
                             String name = element.getFqName().getName();
                             if (name == null || name.isEmpty()) continue;
 
-                            Icon icon = element instanceof C3MacroDefinition ? C3Icons.Nodes.MACRO : C3Icons.Nodes.FUNCTION;
-                            List<String> parametersList = new ArrayList<>();
-                            for (ParamType pt : element.getParameterTypes())
-                            {
-                                List<String> parts = new ArrayList<>();
-                                ShortType t = pt.getType();
-                                if (t != null) parts.add(t.getFullName());
-                                parts.add(pt.getName());
-                                parametersList.add(String.join(" ", parts));
-                            }
-                            String paramStr = String.join(", ", parametersList);
-                            boolean noParams = parametersList.isEmpty();
-
-                            LookupElementBuilder builder = LookupElementBuilder.create(element, name)
-                                .withIcon(icon)
-                                .withPresentableText(name)
-                                .appendTailText("(" + paramStr + ")", false)
-                                .withTypeText(element.getReturnType() != null ? element.getReturnType().getFullName() : "")
-                                .withInsertHandler((insertionContext, item) -> {
-                                    int end = insertionContext.getTailOffset();
-                                    CharSequence chars = insertionContext.getDocument().getCharsSequence();
-                                    if (end < chars.length() && chars.charAt(end) == '(')
-                                    {
-                                        insertionContext.getEditor().getCaretModel().moveToOffset(end + 1);
-                                    }
-                                    else
-                                    {
-                                        insertionContext.getDocument().insertString(end, "()");
-                                        insertionContext.getEditor().getCaretModel().moveToOffset(noParams ? end + 2 : end + 1);
-                                    }
-                                });
-
-                            scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 10.0));
+                            scopedResult.addElement(PrioritizedLookupElement.withPriority(
+                                callableBuilder(element, name), 10.0));
+                            addedCallables++;
                         }
                         else if (psiElement instanceof C3ConstDeclarationStmt constDecl)
                         {
@@ -208,6 +180,12 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
                             scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 8.0));
                         }
                     }
+                }
+                if (addedCallables == 0)
+                {
+                    // The index has no callables for this module (stale or broken index):
+                    // read the module file directly so qualified completion keeps working.
+                    addModuleFileCallables(project, modName, modulePrefix, scopedResult);
                 }
             }
             return;
@@ -309,6 +287,62 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
                     });
                 scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 10.0));
             }
+        }
+    }
+
+    private static @NotNull LookupElementBuilder callableBuilder(
+            @NotNull C3CallablePsiElement element,
+            @NotNull String name)
+    {
+        Icon icon = element instanceof C3MacroDefinition ? C3Icons.Nodes.MACRO : C3Icons.Nodes.FUNCTION;
+        List<String> parametersList = new ArrayList<>();
+        for (ParamType pt : element.getParameterTypes())
+        {
+            List<String> parts = new ArrayList<>();
+            ShortType t = pt.getType();
+            if (t != null) parts.add(t.getFullName());
+            parts.add(pt.getName());
+            parametersList.add(String.join(" ", parts));
+        }
+        String paramStr = String.join(", ", parametersList);
+        boolean noParams = parametersList.isEmpty();
+
+        return LookupElementBuilder.create(element, name)
+            .withIcon(icon)
+            .withPresentableText(name)
+            .appendTailText("(" + paramStr + ")", false)
+            .withTypeText(element.getReturnType() != null ? element.getReturnType().getFullName() : "")
+            .withInsertHandler((insertionContext, item) -> {
+                int end = insertionContext.getTailOffset();
+                CharSequence chars = insertionContext.getDocument().getCharsSequence();
+                if (end < chars.length() && chars.charAt(end) == '(')
+                {
+                    insertionContext.getEditor().getCaretModel().moveToOffset(end + 1);
+                }
+                else
+                {
+                    insertionContext.getDocument().insertString(end, "()");
+                    insertionContext.getEditor().getCaretModel().moveToOffset(noParams ? end + 2 : end + 1);
+                }
+            });
+    }
+
+    private static void addModuleFileCallables(
+            @NotNull com.intellij.openapi.project.Project project,
+            @NotNull String modName,
+            @NotNull String modulePrefix,
+            @NotNull CompletionResultSet scopedResult)
+    {
+        for (C3CallablePsiElement element :
+            org.c3lang.intellij.index.InterfaceService.INSTANCE.findModuleCallables(modName, project))
+        {
+            String fullName = element.getFqName().getFullName();
+            if (!fullName.startsWith(modulePrefix)) continue;
+            String remainder = fullName.substring(modulePrefix.length());
+            if (remainder.contains("::")) continue;
+            String name = element.getFqName().getName();
+            if (name == null || name.isEmpty()) continue;
+            scopedResult.addElement(PrioritizedLookupElement.withPriority(callableBuilder(element, name), 10.0));
         }
     }
 

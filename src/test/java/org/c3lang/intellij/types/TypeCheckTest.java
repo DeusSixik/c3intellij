@@ -209,6 +209,74 @@ public class TypeCheckTest extends BasePlatformTestCase
         assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 
+    public void testIntToUszWideningOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void take(usz elements) {}
+            fn void foo(int len)
+            {
+                take(len);
+                usz u = len;
+            }
+            """);
+    }
+
+    public void testUszToIszSameWidthOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void take(isz x) {}
+            fn void foo(usz u)
+            {
+                take(u);
+                isz i = u;
+            }
+            """);
+    }
+
+    public void testUintMemberToUszOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            struct Entry
+            {
+                uint count;
+            }
+            fn void take(usz elements) {}
+            fn void foo(Entry* e)
+            {
+                take(e.count);
+                usz u = e.count;
+            }
+            """);
+    }
+
+    public void testCharToIntWideningOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void foo(char c)
+            {
+                int x = c;
+                uint u = c;
+            }
+            """);
+    }
+
+    public void testNarrowingStillError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void foo(usz u, int i)
+            {
+                uint x = u;
+                char c = i;
+            }
+            """), "Cannot assign");
+        assertEquals("Expected two errors, got: " + errors, 2, errors.size());
+    }
+
     public void testCallReturnTypeOk()
     {
         assertNoTypeErrors("""
@@ -369,6 +437,80 @@ public class TypeCheckTest extends BasePlatformTestCase
                 any z = x;
             }
             """);
+    }
+
+    public void testAddressOfTemporaryOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void va_variants_explicit(any... args) {}
+            fn void foo()
+            {
+                int x = 1;
+                any v = &x;
+                va_variants_explicit(&&1, &x, v);
+            }
+            """);
+    }
+
+    public void testArrowOperatorIsError()
+    {
+        myFixture.configureByText("main.c3", """
+            module test;
+            struct Foo { int x; }
+            fn void f()
+            {
+                Foo* fp;
+                fp->x = 1;
+            }
+            """);
+
+        List<HighlightInfo> infos = myFixture.doHighlighting();
+        boolean found = infos.stream().anyMatch(info ->
+            info.getSeverity() == HighlightSeverity.ERROR
+                && info.getDescription() != null
+                && info.getDescription().contains("->"));
+        assertTrue("Expected a parse error mentioning '->', got: " + infos, found);
+
+        // The dot syntax must work for both values and pointers.
+        assertNoTypeErrors("""
+            module test;
+            struct Foo { int x; }
+            fn void f()
+            {
+                Foo f2;
+                f2.x = 1;
+                Foo* fp = &f2;
+                fp.x = 2;
+                int y = fp.x;
+            }
+            """);
+    }
+
+    public void testMacroWithoutAtPrefixIsError()
+    {
+        myFixture.configureByText("main.c3", """
+            module test;
+            macro void badswap(a, b)
+            {
+                var temp = a;
+            }
+            macro void swap2(&x)
+            {
+            }
+            """);
+
+        List<HighlightInfo> infos = myFixture.doHighlighting();
+        List<String> errors = new ArrayList<>();
+        for (HighlightInfo info : infos)
+        {
+            if (info.getSeverity() == HighlightSeverity.ERROR && info.getDescription() != null
+                && info.getDescription().contains("must have a name starting with '@'"))
+            {
+                errors.add(info.getDescription());
+            }
+        }
+        assertEquals("Expected one macro-name error, got: " + errors, 1, errors.size());
     }
 
     public void testAliasOk()

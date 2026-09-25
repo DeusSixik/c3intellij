@@ -49,6 +49,7 @@ import org.c3lang.intellij.psi.C3PathIdent;
 import org.c3lang.intellij.psi.C3PathIdentExpr;
 import org.c3lang.intellij.psi.C3PsiElement;
 import org.c3lang.intellij.psi.C3StringExpr;
+import org.c3lang.intellij.psi.C3StructBody;
 import org.c3lang.intellij.psi.C3StructDeclaration;
 import org.c3lang.intellij.psi.C3StructMemberDeclaration;
 import org.c3lang.intellij.psi.C3TernaryExpr;
@@ -104,6 +105,7 @@ public final class TypeChecker
         INT_TYPES.put("iptr", new int[]{64, 1});
         INT_TYPES.put("uptr", new int[]{64, 0});
         INT_TYPES.put("sz", new int[]{64, 1});
+        INT_TYPES.put("isz", new int[]{64, 1});
         INT_TYPES.put("usz", new int[]{64, 0});
 
         FLOAT_TYPES.put("float16", 16);
@@ -175,6 +177,475 @@ public final class TypeChecker
                 + "' but got " + mismatch.actual + ".";
         }
         return "Cannot return '" + mismatch.sourceName + "' from function returning '" + mismatch.targetName + "'.";
+    }
+
+    // ------------------------------------------------------------------
+    // Explicit casts: (Type)expr
+    // ------------------------------------------------------------------
+
+    /**
+     * Diagnostic for an explicit cast, or {@code null} when the cast is fine.
+     * Rules follow the C3 specification ("Cast expression"): numeric to numeric,
+     * pointer to pointer, pointer to/from a pointer-sized integer, vector/array
+     * with the same element type and size, alias/typedef chains, and
+     * interface to/from {@code any}. Anything else is a compile error; casts
+     * involving {@code any}/interfaces carry a runtime check and produce a
+     * warning instead.
+     */
+    public static @Nullable CastDiagnostic checkCast(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull String targetText,
+            @Nullable InferredType source)
+    {
+        return checkCast(project, contextModule, targetText, source, null);
+    }
+
+    /**
+     * @param operand the cast operand, used to tell simple expressions from
+     *                complex ones for the narrowing warning; may be {@code null}.
+     */
+    public static @Nullable CastDiagnostic checkCast(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull String targetText,
+            @Nullable InferredType source,
+            @Nullable C3Expr operand)
+    {
+        if (source == null) return null;
+        String target = stripOptional(normalize(targetText));
+        if (target.isEmpty()) return null;
+        String sourceName = normalize(source.getName());
+
+        // Discarding a value is always fine: (void)expr.
+        if (target.equals("void")) return null;
+
+        // Resolve alias/typedef chains on both sides first (§2.5): after
+        // resolution the names may simply match.
+        String resolvedTarget = resolveAlias(target, project, contextModule, 0);
+        if (resolvedTarget == null) resolvedTarget = resolveTypedefChain(target, project, contextModule);
+        if (resolvedTarget == null) resolvedTarget = target;
+        String resolvedSource = resolveSourceType(project, contextModule, sourceName);
+        if (resolvedSource == null) resolvedSource = sourceName;
+        InferredType effectiveSource = source.getName().equals(resolvedSource) ? source : kindOf(resolvedSource);
+
+        if (namesEqual(resolvedTarget, resolvedSource)) return null;
+
+        boolean targetNumeric = isNumericName(resolvedTarget);
+        boolean sourceNumeric = isNumericKind(effectiveSource) || isNumericName(resolvedSource);
+        if (targetNumeric && sourceNumeric)
+        {
+            return narrowingWarning(resolvedTarget, effectiveSource, operand);
+        }
+
+        boolean targetPointer = isPointerLikeName(resolvedTarget);
+        boolean sourcePointer = effectiveSource.getKind() == InferredType.Kind.POINTER
+            || isPointerLikeName(resolvedSource);
+        if (targetPointer && sourcePointer) return null;
+        if (effectiveSource.getKind() == InferredType.Kind.POINTER && isIntegerName(resolvedTarget))
+        {
+            if (isPointerSizedIntName(resolvedTarget)) return null;
+            return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target)
+                + "': only pointer-sized integers (iptr, uptr) can hold a pointer.");
+        }
+        if (targetPointer && isIntegerName(resolvedSource))
+        {
+            if (isPointerSizedIntName(resolvedSource)) return null;
+            // A literal zero is the null pointer constant.
+            if (effectiveSource.isLiteral() && BigInteger.ZERO.equals(effectiveSource.getIntValue())) return null;
+            return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target)
+                + "': only pointer-sized integers (iptr, uptr) convert to a pointer.");
+        }
+
+        if (vectorCastCompatible(resolvedTarget, resolvedSource)) return null;
+
+        if (effectiveSource.getKind() == InferredType.Kind.BOOL || resolvedSource.equals("bool"))
+        {
+            if (resolvedTarget.equals("bool")) return null;
+            if (isIntegerName(resolvedTarget)) return null;
+            return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target) + "'.");
+        }
+        if (resolvedTarget.equals("bool"))
+        {
+            if (isIntegerName(resolvedSource) || effectiveSource.getKind() == InferredType.Kind.BOOL) return null;
+            return CastDiagnostic.error("Cannot cast '" + sourceName + "' to 'bool'.");
+        }
+
+        if (isStringName(resolvedTarget) || isStringKind(effectiveSource))
+        {
+            if (isStringCompatible(resolvedTarget, effectiveSource, resolvedSource)) return null;
+            return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target) + "'.");
+        }
+
+        if (effectiveSource.getKind() == InferredType.Kind.NULL)
+        {
+            if (targetPointer || target.endsWith("?") || target.endsWith("!")) return null;
+            return CastDiagnostic.error("Cannot cast 'null' to '" + shortName(target) + "'.");
+        }
+        if (effectiveSource.getKind() == InferredType.Kind.VOID)
+        {
+            return CastDiagnostic.error("Cannot cast 'void' to '" + shortName(target) + "'.");
+        }
+
+        if (resolvedTarget.equals("any") || resolvedSource.equals("any"))
+        {
+            return CastDiagnostic.runtimeWarning(target, sourceName);
+        }
+
+        boolean targetInterface = isInterfaceName(resolvedTarget, project);
+        boolean sourceInterface = isInterfaceName(resolvedSource, project);
+        if (targetInterface && sourceInterface)
+        {
+            return CastDiagnostic.error("Cannot cast interface '" + sourceName + "' to interface '"
+                + shortName(target) + "' directly, convert through 'any' first.");
+        }
+        if (targetInterface || sourceInterface)
+        {
+            if (targetInterface && staticallyImplements(resolvedSource, resolvedTarget, project)) return null;
+            return CastDiagnostic.runtimeWarning(target, sourceName);
+        }
+
+        boolean targetEnum = isEnumName(resolvedTarget, project);
+        boolean sourceEnum = isEnumName(resolvedSource, project);
+        if (targetEnum || sourceEnum)
+        {
+            if (targetEnum && sourceEnum) return CastDiagnostic.error("Cannot cast enum '" + sourceName
+                + "' to enum '" + shortName(target) + "'.");
+            if (isIntegerName(targetEnum ? resolvedSource : resolvedTarget)
+                || isNumericKind(targetEnum ? effectiveSource : kindOf(resolvedTarget))) return null;
+            return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target) + "'.");
+        }
+
+        if (isStructName(resolvedTarget, project) && isStructName(resolvedSource, project))
+        {
+            if (isSubstructOf(resolvedSource, resolvedTarget, project)) return null;
+            return CastDiagnostic.error("Cannot cast struct '" + sourceName + "' to struct '"
+                + shortName(target) + "': no substruct relation, use an explicit conversion instead.");
+        }
+        if (arraySubstructCast(resolvedTarget, resolvedSource, project))
+        {
+            return CastDiagnostic.error("Cannot cast array of substruct '" + sourceName + "' to array of '"
+                + shortName(target) + "': substruct arrays never convert, not even with an explicit cast.");
+        }
+
+        // One side (or both) is an unknown named type: cannot prove it is
+        // forbidden, so stay silent instead of false-positive.
+        if (isUnresolvableName(resolvedTarget, project) || isUnresolvableName(resolvedSource, project)) return null;
+
+        return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target) + "'.");
+    }
+
+    /**
+     * Severity-tagged cast diagnostic.
+     */
+    public static final class CastDiagnostic
+    {
+        /**
+         * True for the runtime-checked {@code any}/interface warning, false for a hard error.
+         */
+        public final boolean warning;
+        public final @NotNull String message;
+
+        private CastDiagnostic(boolean warning, @NotNull String message)
+        {
+            this.warning = warning;
+            this.message = message;
+        }
+
+        static @NotNull CastDiagnostic error(@NotNull String message)
+        {
+            return new CastDiagnostic(false, message);
+        }
+
+        static @NotNull CastDiagnostic runtimeWarning(@NotNull String target, @NotNull String sourceName)
+        {
+            return new CastDiagnostic(true, "Cast from '" + sourceName + "' to '" + shortName(target)
+                + "' is checked at runtime and may fail.");
+        }
+
+        static @NotNull CastDiagnostic narrowingWarning(@NotNull String shortTarget)
+        {
+            return new CastDiagnostic(true, "Cast to '" + shortTarget
+                + "' may silently lose precision for a non-constant expression.");
+        }
+    }
+
+    private static boolean isNumericName(@NotNull String typeName)
+    {
+        String shortTarget = shortName(typeName);
+        if (INT_TYPES.containsKey(shortTarget) || FLOAT_TYPES.containsKey(shortTarget)) return true;
+        return shortTarget.equals("char") || shortTarget.equals("ichar") || shortTarget.equals("bool");
+    }
+
+    private static boolean isNumericKind(@NotNull InferredType type)
+    {
+        return type.getKind() == InferredType.Kind.INT
+            || type.getKind() == InferredType.Kind.FLOAT
+            || type.getKind() == InferredType.Kind.CHAR;
+    }
+
+    private static boolean isIntegerName(@NotNull String typeName)
+    {
+        String shortTarget = shortName(typeName);
+        if (INT_TYPES.containsKey(shortTarget)) return true;
+        return shortTarget.equals("char") || shortTarget.equals("ichar");
+    }
+
+    private static boolean isPointerName(@NotNull String typeName)
+    {
+        String clean = normalize(typeName);
+        return clean.endsWith("*") && !clean.endsWith("**") && parseArrayPointer(clean) == null
+            || clean.endsWith("**");
+    }
+
+    private static boolean isPointerLikeName(@NotNull String typeName)
+    {
+        String clean = normalize(typeName);
+        if (clean.endsWith("*")) return true;
+        if (clean.endsWith("[]")) return true;
+        return parseArray(clean) != null || parseVector(clean) != null;
+    }
+
+    private static boolean isPointerSizedIntName(@NotNull String typeName)
+    {
+        return switch (shortName(normalize(typeName)))
+        {
+            case "iptr", "uptr", "sz", "isz", "usz", "long", "ulong" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isStringName(@NotNull String typeName)
+    {
+        return switch (shortName(normalize(typeName)))
+        {
+            case "String", "ZString" -> true;
+            default -> false;
+        };
+    }
+
+    private static boolean isStringKind(@NotNull InferredType type)
+    {
+        if (type.getKind() == InferredType.Kind.STRING) return true;
+        String name = normalize(type.getName());
+        return name.equals("char[]") || name.equals("ichar[]") || name.equals("char*") || name.equals("ichar*");
+    }
+
+    private static boolean isStringCompatible(
+            @NotNull String resolvedTarget, @NotNull InferredType effectiveSource, @NotNull String resolvedSource)
+    {
+        if (isStringKind(effectiveSource) && (isStringName(resolvedTarget) || isStringKind(kindOf(resolvedTarget)))) return true;
+        if (isStringName(resolvedSource) && (isStringName(resolvedTarget) || isStringKind(kindOf(resolvedTarget)))) return true;
+        return isStringName(resolvedTarget) && isPointerName(resolvedSource);
+    }
+
+    private static boolean vectorCastCompatible(@NotNull String resolvedTarget, @NotNull String resolvedSource)
+    {
+        VectorInfo targetVector = parseVector(resolvedTarget);
+        VectorInfo sourceVector = parseVector(resolvedSource);
+        if (targetVector != null || sourceVector != null)
+        {
+            if (targetVector == null || sourceVector == null) return false;
+            if (!namesEqual(targetVector.element, sourceVector.element)) return false;
+            return targetVector.size == sourceVector.size && targetVector.size >= 0;
+        }
+        VectorInfo targetArray = parseArray(resolvedTarget);
+        VectorInfo sourceArray = parseArray(resolvedSource);
+        if (targetArray == null || sourceArray == null) return false;
+        if (!namesEqual(targetArray.element, sourceArray.element)) return false;
+        return targetArray.size == sourceArray.size && targetArray.size >= 0;
+    }
+
+    private static @Nullable String resolveTypedefChain(
+            @NotNull String typeName,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        String current = typeName;
+        for (int depth = 0; depth < 4; depth++)
+        {
+            String next = resolveTypedef(current, project, contextModule, 0);
+            if (next == null) next = resolveInlineTypedef(current, project, contextModule, 0);
+            if (next == null) return depth == 0 ? null : current;
+            current = next;
+        }
+        return current;
+    }
+
+    private static boolean isInterfaceName(@NotNull String typeName, @NotNull Project project)
+    {
+        return findTypeParent(typeName, project) instanceof C3InterfaceDefinition;
+    }
+
+    private static boolean isEnumName(@NotNull String typeName, @NotNull Project project)
+    {
+        return findTypeParent(typeName, project) instanceof C3EnumDeclaration;
+    }
+
+    private static boolean isStructName(@NotNull String typeName, @NotNull Project project)
+    {
+        PsiElement parent = findTypeParent(typeName, project);
+        return parent instanceof C3StructDeclaration || parent instanceof C3BitstructDeclaration;
+    }
+
+    private static boolean isUnresolvableName(@NotNull String typeName, @NotNull Project project)
+    {
+        String clean = normalize(typeName);
+        if (!isUserTypeName(clean)) return false;
+        if (DumbService.isDumb(project)) return true;
+        return findTypeParent(clean, project) == null;
+    }
+
+    private static @Nullable PsiElement findTypeParent(@NotNull String typeName, @NotNull Project project)
+    {
+        String clean = normalize(typeName);
+        if (!isUserTypeName(clean)) return null;
+        String wanted = shortName(clean);
+        for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
+        {
+            if (!key.equals(wanted) && !key.endsWith("::" + wanted)) continue;
+            for (C3PsiElement element : StubIndex.getElements(
+                    TypeIndex.KEY,
+                    key,
+                    project,
+                    C3ProjectService.getInstance(project).getSearchScope(),
+                    C3PsiElement.class))
+            {
+                if (!(element instanceof C3TypeName typeNameElement)) continue;
+                if (!typeNameElement.getText().strip().equals(wanted)) continue;
+                PsiElement parent = typeNameElement.getParent();
+                if (parent instanceof C3StructDeclaration
+                    || parent instanceof C3BitstructDeclaration
+                    || parent instanceof C3EnumDeclaration
+                    || parent instanceof C3InterfaceDefinition
+                    || parent instanceof C3TypedefDecl
+                    || parent instanceof C3AliasTypeDecl)
+                {
+                    return parent;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static boolean staticallyImplements(
+            @NotNull String sourceName, @NotNull String ifaceName, @NotNull Project project)
+    {
+        if (DumbService.isDumb(project)) return false;
+        try
+        {
+            FullyQualifiedName source = FullyQualifiedName.parse(sourceName);
+            List<FullyQualifiedName> implemented =
+                org.c3lang.intellij.index.InterfaceService.INSTANCE.getImplementedInterfaces(source, project);
+            String wanted = shortName(ifaceName);
+            for (FullyQualifiedName candidate : implemented)
+            {
+                if (candidate.getName().equals(wanted) || candidate.getFullName().equals(ifaceName)) return true;
+            }
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean isSubstructOf(
+            @NotNull String childName, @NotNull String parentName, @NotNull Project project)
+    {
+        if (DumbService.isDumb(project)) return false;
+        try
+        {
+            FullyQualifiedName child = FullyQualifiedName.parse(childName);
+            List<C3StructDeclaration> declarations =
+                org.c3lang.intellij.index.InterfaceService.INSTANCE.findStructDeclarations(child, project);
+            String wanted = shortName(parentName);
+            for (C3StructDeclaration declaration : declarations)
+            {
+                C3StructBody body = declaration.getStructBody();
+                if (body == null) continue;
+                for (C3StructMemberDeclaration member : body.getStructMemberDeclarationList())
+                {
+                    // An inline substruct member is written as a bare type (`inline Foo;`).
+                    if (member.getIdentifierList() != null) continue;
+                    if (member.getStructBody() != null || member.getBitstructBody() != null) continue;
+                    C3Type memberType = member.getType();
+                    if (memberType == null) continue;
+                    if (shortName(normalize(memberType.getText())).equals(wanted)) return true;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean arraySubstructCast(
+            @NotNull String resolvedTarget, @NotNull String resolvedSource, @NotNull Project project)
+    {
+        String targetElement = arrayElementType(resolvedTarget);
+        String sourceElement = arrayElementType(resolvedSource);
+        if (targetElement == null || sourceElement == null) return false;
+        if (namesEqual(targetElement, sourceElement)) return false;
+        return isStructName(targetElement, project) && isStructName(sourceElement, project)
+            && (isSubstructOf(sourceElement, targetElement, project)
+                || isSubstructOf(targetElement, sourceElement, project));
+    }
+
+    /**
+     * Warning for {@code (narrow_type)complex_expr}: the value may silently
+     * lose precision even though the compiler accepts the cast. Literals and
+     * simple expressions are skipped.
+     */
+    private static @Nullable CastDiagnostic narrowingWarning(
+            @NotNull String resolvedTarget, @NotNull InferredType effectiveSource, @Nullable C3Expr operand)
+    {
+        if (operand == null || isSimpleOperand(operand)) return null;
+        if (effectiveSource.isLiteral()) return null;
+        String shortTarget = shortName(resolvedTarget);
+        if (shortTarget.equals("bool")) return null;
+        int[] targetBits = INT_TYPES.get(shortTarget);
+        if (targetBits == null && !shortTarget.equals("char") && !shortTarget.equals("ichar")) return null;
+        int targetWidth = targetBits != null ? targetBits[0] : 8;
+        Integer sourceWidth = numericWidth(effectiveSource);
+        // int -> float widens implicitly and is always fine.
+        if (FLOAT_TYPES.containsKey(shortTarget)) return null;
+        if (effectiveSource.getKind() == InferredType.Kind.FLOAT && targetBits == null) return null;
+        if (sourceWidth != null && sourceWidth <= targetWidth) return null;
+        return CastDiagnostic.narrowingWarning(shortTarget);
+    }
+
+    private static @Nullable Integer numericWidth(@NotNull InferredType type)
+    {
+        String shortSource = shortName(type.getName());
+        int[] intBits = INT_TYPES.get(shortSource);
+        if (intBits != null) return intBits[0];
+        if (shortSource.equals("char") || shortSource.equals("ichar")) return 8;
+        Integer floatBits = FLOAT_TYPES.get(shortSource);
+        if (floatBits != null) return floatBits;
+        return switch (type.getKind())
+        {
+            case INT, CHAR -> 32;
+            case FLOAT -> 64;
+            default -> null;
+        };
+    }
+
+    private static boolean isSimpleOperand(@NotNull C3Expr operand)
+    {
+        if (operand instanceof C3LiteralExpr
+            || operand instanceof C3StringExpr
+            || operand instanceof C3KeywordExpr
+            || operand instanceof C3PathIdentExpr
+            || operand instanceof C3PathConstExpr) return true;
+        if (operand instanceof C3GroupedExpr grouped)
+        {
+            C3Expr inner = grouped.getExpr();
+            return inner != null && isSimpleOperand(inner);
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -395,16 +866,16 @@ public final class TypeChecker
                 break;
             case CHAR:
             case INT:
-                if (FLOAT_TYPES.containsKey(base)) return null;
+                if (FLOAT_TYPES.containsKey(shortName(base))) return null;
                 if (intAssignable(base, source)) return null;
-                if (source.isLiteral() && source.getIntValue() != null && INT_TYPES.get(base) != null)
+                if (source.isLiteral() && source.getIntValue() != null && intWidth(shortName(base)) >= 0)
                 {
                     return new Mismatch(source.getName(), targetName, source.getIntValue(), null, -1, -1);
                 }
                 break;
             case FLOAT:
                 if (floatAssignable(base, source)) return null;
-                if (source.isLiteral() && source.getFloatValue() != null && FLOAT_TYPES.get(base) != null)
+                if (source.isLiteral() && source.getFloatValue() != null && FLOAT_TYPES.get(shortName(base)) != null)
                 {
                     return new Mismatch(source.getName(), targetName, null, source.getFloatValue(), -1, -1);
                 }
@@ -876,22 +1347,30 @@ public final class TypeChecker
 
     private static boolean intAssignable(@NotNull String base, @NotNull InferredType source)
     {
-        int[] targetBits = INT_TYPES.get(base);
-        if (targetBits == null) return false;
+        String shortBase = shortName(base);
+        int targetWidth = intWidth(shortBase);
+        if (targetWidth < 0) return false;
         if (source.isLiteral())
         {
             // Typed literal without a known value (e.g. a wide char literal):
             // only the exact type is accepted, checked by the caller.
-            return source.getIntValue() != null && fits(source.getIntValue(), targetBits);
+            if (source.getIntValue() == null) return false;
+            int[] targetBits = INT_TYPES.get(shortBase);
+            if (targetBits != null) return fits(source.getIntValue(), targetBits);
+            // `char` is an 8-bit unsigned integer.
+            return shortBase.equals("char") && fitsUnsigned(source.getIntValue(), 8);
         }
-        int[] sourceBits = INT_TYPES.get(source.getName());
-        if (sourceBits == null) return false;
-        return rangeFits(rangeMin(sourceBits), rangeMax(sourceBits), rangeMin(targetBits), rangeMax(targetBits));
+        // Implicit widening: a value of a narrower (or equally wide) integer
+        // type converts to the target, regardless of signedness. Narrowing a
+        // wider integer type needs an explicit cast.
+        int sourceWidth = intWidth(shortName(source.getName()));
+        if (sourceWidth < 0) return false;
+        return targetWidth >= sourceWidth;
     }
 
     private static boolean floatAssignable(@NotNull String base, @NotNull InferredType source)
     {
-        Integer targetBits = FLOAT_TYPES.get(base);
+        Integer targetBits = FLOAT_TYPES.get(shortName(base));
         if (targetBits == null) return false;
         if (source.isLiteral())
         {
@@ -901,8 +1380,25 @@ public final class TypeChecker
             double max = maxFloat(targetBits);
             return Math.abs(value) <= max;
         }
-        Integer sourceBits = FLOAT_TYPES.get(source.getName());
+        Integer sourceBits = FLOAT_TYPES.get(shortName(source.getName()));
         return sourceBits != null && sourceBits <= targetBits;
+    }
+
+    /**
+     * Bit width of an integer type name ({@code char} counts as unsigned 8),
+     * or {@code -1} for non-integer names.
+     */
+    private static int intWidth(@NotNull String shortName)
+    {
+        int[] bits = INT_TYPES.get(shortName);
+        if (bits != null) return bits[0];
+        if (shortName.equals("char")) return 8;
+        return -1;
+    }
+
+    private static boolean fitsUnsigned(@NotNull BigInteger value, int bits)
+    {
+        return value.signum() >= 0 && value.bitLength() <= bits;
     }
 
     private static boolean fits(@NotNull BigInteger value, @NotNull int[] bits)
@@ -941,16 +1437,19 @@ public final class TypeChecker
 
     /**
      * Maps a written type text to an inferred type (never a literal).
+     * Primitive names may be module-qualified (e.g. a struct member type
+     * resolved to {@code mod::uint}); they are shortened to the builtin name.
      */
     public static @NotNull InferredType kindOf(@NotNull String typeText)
     {
         String text = normalize(typeText);
-        if (text.equals("void")) return InferredType.voidType();
-        if (text.equals("bool")) return InferredType.boolType(false);
-        if (text.equals("char")) return InferredType.of(InferredType.Kind.CHAR, "char");
-        if (INT_TYPES.containsKey(text)) return InferredType.of(InferredType.Kind.INT, text);
-        if (FLOAT_TYPES.containsKey(text)) return InferredType.of(InferredType.Kind.FLOAT, text);
-        if (text.equals("String") || text.equals("ZString")) return InferredType.of(InferredType.Kind.STRING, text);
+        String shortText = shortName(text);
+        if (shortText.equals("void")) return InferredType.voidType();
+        if (shortText.equals("bool")) return InferredType.boolType(false);
+        if (shortText.equals("char")) return InferredType.of(InferredType.Kind.CHAR, "char");
+        if (INT_TYPES.containsKey(shortText)) return InferredType.of(InferredType.Kind.INT, shortText);
+        if (FLOAT_TYPES.containsKey(shortText)) return InferredType.of(InferredType.Kind.FLOAT, shortText);
+        if (shortText.equals("String") || shortText.equals("ZString")) return InferredType.of(InferredType.Kind.STRING, shortText);
         if (text.endsWith("*")) return InferredType.of(InferredType.Kind.POINTER, text);
         return InferredType.of(InferredType.Kind.NAMED, text);
     }
@@ -1172,6 +1671,16 @@ public final class TypeChecker
             return kindOf(unary.getUnaryOp().getType().getText());
         }
         String op = unary.getUnaryOp().getText().strip();
+        if (op.equals("&&"))
+        {
+            // Address of a temporary (rvalue), e.g. &&1: the operand type with no
+            // addressability requirement.
+            C3Expr tempOperand = unary.getExpr();
+            if (tempOperand == null) return null;
+            InferredType tempInner = infer(tempOperand, depth + 1);
+            if (tempInner == null) return null;
+            return InferredType.of(InferredType.Kind.POINTER, tempInner.getName() + "*");
+        }
         C3Expr operand = unary.getExpr();
         if (operand == null) return null;
         InferredType inner = infer(operand, depth + 1);
