@@ -704,6 +704,62 @@ public class TypeCheckTest extends BasePlatformTestCase
             """);
     }
 
+    public void testVoidPointerWildcardOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn void take(void* ptr) {}
+            fn void foo()
+            {
+                int x = 1;
+                int* p = &x;
+                int[4] arr = { 1, 2, 3, 4 };
+                int[4]* ap = &arr;
+                int[] s = &arr;
+                take(p);
+                take(ap);
+                take(s);
+                take(&arr);
+                take(&x);
+                take(null);
+            }
+            """);
+    }
+
+    public void testVoidPointerMemberSliceOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            struct Tf
+            {
+                int[] a;
+            }
+            fn void methodTest(void* ptr) {}
+            fn void foo()
+            {
+                Tf tf;
+                methodTest(tf.a);
+                int[] s = tf.a;
+            }
+            """);
+    }
+
+    public void testVoidPointerRejectsValues()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void take(void* ptr) {}
+            fn void foo()
+            {
+                int x = 1;
+                int[4] arr = { 1, 2, 3, 4 };
+                take(x);
+                take(arr);
+            }
+            """), "Cannot pass");
+        assertEquals("Expected two errors, got: " + errors, 2, errors.size());
+    }
+
     private @NotNull List<HighlightInfo> check(@NotNull String code)
     {
         myFixture.configureByText("main.c3", code);

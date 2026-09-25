@@ -547,6 +547,7 @@ public class C3Annotator implements Annotator
     {
         annotateReturnCoverage(funcDef, holder);
         DuplicateChecker.checkFunction(funcDef, holder);
+        annotateMainOptional(funcDef, holder);
 
         String ownerText = InterfaceService.methodOwnerTypeName(funcDef);
         if (ownerText == null) return;
@@ -599,6 +600,31 @@ public class C3Annotator implements Annotator
         if (!taken.contains("self")) return "self";
         if (!taken.contains("this")) return "this";
         return "self_";
+    }
+
+    /**
+     * The program entry point cannot return an Optional.
+     */
+    private void annotateMainOptional(@NotNull C3FuncDef funcDef, @NotNull AnnotationHolder holder)
+    {
+        if (InterfaceService.methodOwnerTypeName(funcDef) != null) return;
+        FullyQualifiedName fqName;
+        try
+        {
+            fqName = funcDef.getFqName();
+        }
+        catch (Exception e)
+        {
+            return;
+        }
+        if (fqName == null || !"main".equals(fqName.getName())) return;
+        ShortType returnType = funcDef.getReturnType();
+        if (returnType == null || returnType.getValue() == null) return;
+        if (!TypeChecker.isOptionalName(returnType.getValue().strip())) return;
+        PsiElement anchor = funcDef.getNameIdentifier() != null ? funcDef.getNameIdentifier() : funcDef;
+        holder.newAnnotation(HighlightSeverity.ERROR, "The 'main' function cannot return an Optional.")
+            .range(anchor)
+            .create();
     }
 
     private void annotateMacroDefinition(@NotNull C3MacroDefinition macroDef, @NotNull AnnotationHolder holder)
@@ -694,6 +720,23 @@ public class C3Annotator implements Annotator
         String targetText = decl.getOptionalType().getType().getText();
         if (targetText.isBlank()) return;
         boolean nullableTarget = decl.getOptionalType().getNode().findChildByType(C3Types.QUESTION) != null;
+        if (nullableTarget && TypeChecker.isVoidType(targetText.strip()))
+        {
+            // `void?` has no variable representation, only a return type.
+            C3LocalDeclAfterType first = after.getLocalDeclAfterTypeList().isEmpty()
+                ? null
+                : after.getLocalDeclAfterTypeList().get(0);
+            PsiElement anchor = first != null && first.getNameIdentifier() != null
+                ? first.getNameIdentifier()
+                : decl;
+            holder.newAnnotation(
+                    HighlightSeverity.ERROR,
+                    "Optional void (void?) cannot be used as a variable type, only as a function return type.")
+                .range(anchor)
+                .create();
+            return;
+        }
+        if (nullableTarget && !TypeChecker.isOptionalName(targetText.strip())) targetText = targetText.strip() + "?";
         for (C3LocalDeclAfterType declarator : after.getLocalDeclAfterTypeList())
         {
             if (declarator.getNameIdent() != null && declarator.getNameIdent().startsWith("$")) continue;
@@ -734,7 +777,7 @@ public class C3Annotator implements Annotator
                 return null;
             }
             if (resolved == null) return null;
-            return TypeChecker.declaredTypeText(resolved);
+            return TypeChecker.assignedTypeText(resolved);
         }
         if (lhs instanceof C3CallExpr call
             && call.getCallExprTail() != null
@@ -766,6 +809,11 @@ public class C3Annotator implements Annotator
         ShortType returnType = funcDef.getReturnType();
         String returnText = returnType != null && returnType.getValue() != null ? returnType.getValue() : "void";
         C3Expr expr = ret.getExpr();
+        if (TypeChecker.isVoidOptionalType(returnText))
+        {
+            annotateVoidOptionalReturn(ret, expr, holder);
+            return;
+        }
         if (expr == null)
         {
             if (!TypeChecker.isVoidType(returnText))
@@ -789,6 +837,26 @@ public class C3Annotator implements Annotator
         if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(expr).create();
     }
 
+    /**
+     * A {@code void?} function returns either nothing or an excuse: bare
+     * {@code return}, {@code fault~} and other Optionals are fine, any plain
+     * value is an error.
+     */
+    private void annotateVoidOptionalReturn(
+            @NotNull C3ReturnStmt ret, @Nullable C3Expr expr, @NotNull AnnotationHolder holder)
+    {
+        if (expr == null) return;
+        InferredType source = TypeChecker.infer(expr);
+        if (source == null) return;
+        String sourceName = TypeChecker.normalize(source.getName());
+        if (TypeChecker.isOptionalName(sourceName) || sourceName.equals("fault")) return;
+        holder.newAnnotation(
+                HighlightSeverity.ERROR,
+                "Cannot return '" + source.getName() + "' from function returning 'void?'.")
+            .range(expr)
+            .create();
+    }
+
     private static @NotNull PsiElement returnKeywordOrSelf(@NotNull C3ReturnStmt ret)
     {
         ASTNode keyword = ret.getNode().findChildByType(C3Types.KW_RETURN);
@@ -799,7 +867,9 @@ public class C3Annotator implements Annotator
     {
         if (DumbService.isDumb(funcDef.getProject())) return;
         ShortType returnType = funcDef.getReturnType();
-        if (returnType == null || returnType.getValue() == null || TypeChecker.isVoidType(returnType.getValue())) return;
+        if (returnType == null || returnType.getValue() == null
+            || TypeChecker.isVoidType(returnType.getValue())
+            || TypeChecker.isVoidOptionalType(returnType.getValue())) return;
         PsiElement parent = funcDef.getParent();
         if (!(parent instanceof C3FuncDefinition definition)
             || definition.getMacroFuncBody() == null

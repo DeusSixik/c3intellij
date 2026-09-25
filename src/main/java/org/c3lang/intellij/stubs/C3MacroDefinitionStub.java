@@ -55,7 +55,7 @@ public class C3MacroDefinitionStub extends StubBase<C3MacroDefinition>
 				: null,
 			FullyQualifiedName.from(psi.getMacroHeader(), ModuleName.from(psi)),
 			psi.getMacroHeader().getOptionalType() != null
-				? ShortType.from(psi.getMacroHeader().getOptionalType().getType())
+				? ShortType.fromOptionalType(psi.getMacroHeader().getOptionalType())
 				: null,
 			ParamType.toParamTypeList(
 				psi.getMacroParams().getParameterList() != null

@@ -19,7 +19,10 @@ import org.c3lang.intellij.psi.C3BaseType;
 import org.c3lang.intellij.psi.C3BinaryExpr;
 import org.c3lang.intellij.psi.C3BinaryOp;
 import org.c3lang.intellij.psi.C3BitstructDeclaration;
+import org.c3lang.intellij.psi.C3CallArgList;
 import org.c3lang.intellij.psi.C3CallExpr;
+import org.c3lang.intellij.psi.C3CallExprTail;
+import org.c3lang.intellij.psi.C3CallInvocation;
 import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3CompoundInitExpr;
 import org.c3lang.intellij.psi.C3ConstDeclarationStmt;
@@ -148,7 +151,20 @@ public final class TypeChecker
             return "Expected " + mismatch.count + " elements for type '" + mismatch.targetName
                 + "' but got " + mismatch.actual + ".";
         }
-        return "Cannot assign '" + mismatch.sourceName + "' to '" + mismatch.targetName + "'.";
+        return "Cannot assign '" + mismatch.sourceName + "' to '" + mismatch.targetName + "'."
+            + unwrapHint(mismatch.sourceName);
+    }
+
+    /**
+     * Hint appended when an Optional value meets a plain type.
+     */
+    private static @NotNull String unwrapHint(@NotNull String sourceName)
+    {
+        if (isOptionalName(sourceName))
+        {
+            return " Use '!' to rethrow, '!!' to force unwrap or '??' for a default value.";
+        }
+        return "";
     }
 
     /**
@@ -176,7 +192,8 @@ public final class TypeChecker
             return "Expected " + mismatch.count + " elements for type '" + mismatch.targetName
                 + "' but got " + mismatch.actual + ".";
         }
-        return "Cannot return '" + mismatch.sourceName + "' from function returning '" + mismatch.targetName + "'.";
+        return "Cannot return '" + mismatch.sourceName + "' from function returning '" + mismatch.targetName + "'."
+            + unwrapHint(mismatch.sourceName);
     }
 
     // ------------------------------------------------------------------
@@ -663,6 +680,15 @@ public final class TypeChecker
             @Nullable InferredType arg)
     {
         if (arg == null) return null;
+        if (isOptionalName(arg.getName()) && !isOptionalName(normalize(paramTypeText)))
+        {
+            // Cascading: a function called with an Optional argument is only
+            // executed when all Optional arguments hold results, and its own
+            // result becomes Optional. Only the unwrapped types must match.
+            Mismatch unwrapped = check(project, contextModule, paramTypeText, kindOf(stripOptional(arg.getName())));
+            if (unwrapped == null) return null;
+            // Otherwise fall through and report the Optional mismatch below.
+        }
         Mismatch mismatch = check(project, contextModule, paramTypeText, arg);
         if (mismatch == null) return null;
         // Undeclared (e.g. generic) parameter types are not checked.
@@ -681,7 +707,7 @@ public final class TypeChecker
                 + "' but got " + mismatch.actual + ".";
         }
         return "Cannot pass '" + mismatch.sourceName + "' for parameter '" + paramName
-            + "' of type '" + mismatch.targetName + "'.";
+            + "' of type '" + mismatch.targetName + "'." + unwrapHint(mismatch.sourceName);
     }
 
     /**
@@ -756,6 +782,16 @@ public final class TypeChecker
         return normalize(typeText).equals("void");
     }
 
+    /**
+     * Whether the text is the {@code void?} Optional: only usable as a
+     * function return type, never as a variable.
+     */
+    public static boolean isVoidOptionalType(@NotNull String typeText)
+    {
+        String clean = normalize(typeText);
+        return clean.equals("void?") || clean.equals("void!");
+    }
+
     public static @NotNull String normalize(@NotNull String typeText)
     {
         return typeText.replaceAll("\\s+", "");
@@ -827,6 +863,37 @@ public final class TypeChecker
         if (namesEqual(base, source.getName())) return null;
         // `any` accepts any value (but void is not a value).
         if (base.equals("any") && source.getKind() != InferredType.Kind.VOID) return null;
+
+        // Optional handling: `T?` holds either a `T` result or a fault.
+        boolean targetOptional = isOptionalName(target);
+        boolean sourceOptional = isOptionalName(source.getName());
+        if (targetOptional && sourceOptional)
+        {
+            // `T?` accepts `U?` when the unwrapped result types are compatible.
+            Mismatch inner = checkOnce(stripOptional(target), kindOf(stripOptional(source.getName())));
+            if (inner == null) return null;
+            return new Mismatch(source.getName(), targetName, null, null, -1, -1);
+        }
+        if (targetOptional)
+        {
+            // A plain value converts into the Optional's result type.
+            return checkOnce(base, source);
+        }
+        if (sourceOptional)
+        {
+            // An Optional never converts to a plain type implicitly: use `!`
+            // (rethrow), `!!` (force unwrap) or `?? default` to unwrap it.
+            return new Mismatch(source.getName(), targetName, null, null, -1, -1);
+        }
+
+        // `void*` is a wildcard matching any pointer-like source: pointers,
+        // array pointers and slices (which convert to pointers), strings,
+        // `null` and `any`. A fixed array value does not decay into it.
+        if (base.equals("void*"))
+        {
+            if (isVoidPointerCompatible(source)) return null;
+            return new Mismatch(source.getName(), targetName, null, null, -1, -1);
+        }
 
         if (source.getKind() == InferredType.Kind.INIT_LIST)
         {
@@ -1130,6 +1197,36 @@ public final class TypeChecker
      * </ul>
      * Fixed arrays never convert implicitly; anything else needs an explicit cast.
      */
+    /**
+     * Whether a value converts to the {@code void*} wildcard: any pointer
+     * (plain or array pointer), any slice, strings, {@code null} and
+     * {@code any}. Anything else, including fixed array values (which need
+     * an explicit {@code &}), does not.
+     */
+    private static boolean isVoidPointerCompatible(@NotNull InferredType source)
+    {
+        switch (source.getKind())
+        {
+            case POINTER:
+            case NULL:
+            case STRING:
+                return true;
+            case BOOL:
+            case CHAR:
+            case INT:
+            case FLOAT:
+            case VOID:
+            case INIT_LIST:
+                return false;
+            case NAMED:
+                break;
+        }
+        String name = normalize(source.getName());
+        if (name.equals("any") || name.equals("void*")) return true;
+        if (name.endsWith("[]")) return true;
+        return parseArrayPointer(name) != null;
+    }
+
     private static boolean arrayPointerCompatible(@NotNull String base, @NotNull InferredType source)
     {
         String sourceName = source.getName();
@@ -1325,6 +1422,15 @@ public final class TypeChecker
     {
         if ((target.endsWith("?") || target.endsWith("!")) && !target.endsWith("*")) return target.substring(0, target.length() - 1);
         return target;
+    }
+
+    /**
+     * Whether a type name carries the Optional suffix (`T?`, old syntax `T!`).
+     */
+    public static boolean isOptionalName(@NotNull String typeName)
+    {
+        String clean = normalize(typeName);
+        return (clean.endsWith("?") || clean.endsWith("!")) && !clean.endsWith("*") && clean.length() > 1;
     }
 
     private static boolean isStringTarget(@NotNull String base, @NotNull InferredType source)
@@ -1759,6 +1865,13 @@ public final class TypeChecker
             {
                 return leftType.isLiteral() && rightType.isLiteral() ? leftType : InferredType.of(leftType.getKind(), leftType.getName());
             }
+            if (op.equals("??") && leftType != null && rightType != null && isOptionalName(leftType.getName()))
+            {
+                // `opt ?? default`: the default replaces the empty case, so a
+                // matching default unwraps the result to the plain value type.
+                String unwrapped = stripOptional(leftType.getName());
+                if (namesEqual(unwrapped, rightType.getName())) return kindOf(unwrapped);
+            }
             return null;
         }
         InferredType leftType = infer(left, depth + 1);
@@ -1925,7 +2038,7 @@ public final class TypeChecker
             return null;
         }
         if (resolved == null) return null;
-        String declared = declaredTypeText(resolved);
+        String declared = assignedTypeText(resolved);
         if (declared != null) return kindOf(declared);
         if (resolved instanceof C3ConstDeclarationStmt constDecl)
         {
@@ -1947,7 +2060,7 @@ public final class TypeChecker
             return null;
         }
         if (resolved == null) return null;
-        String declared = declaredTypeText(resolved);
+        String declared = assignedTypeText(resolved);
         if (declared != null) return kindOf(declared);
         if (resolved instanceof C3EnumConstant enumConstant)
         {
@@ -2007,10 +2120,51 @@ public final class TypeChecker
         return null;
     }
 
+    /**
+     * Declared type of a variable for assignment checking, preserving the
+     * Optional suffix: {@code int?} for {@code int? x}, plain text otherwise.
+     */
+    public static @Nullable String assignedTypeText(@NotNull PsiElement resolved)
+    {
+        String base = declaredTypeText(resolved);
+        if (base == null) return null;
+        if (resolved instanceof C3LocalDeclAfterType)
+        {
+            C3LocalDeclarationStmt stmt =
+                PsiTreeUtil.getParentOfType(resolved, C3LocalDeclarationStmt.class);
+            if (stmt != null && stmt.getOptionalType() != null
+                && stmt.getOptionalType().getNode().findChildByType(C3Types.QUESTION) != null
+                && !isOptionalName(base))
+            {
+                return base + "?";
+            }
+        }
+        return base;
+    }
+
     private static @Nullable InferredType inferCall(@NotNull C3CallExpr call, int depth)
     {
         if (call.getCallExprTail() == null || call.getCallExprTail().getCallInvocation() == null)
         {
+            C3CallExprTail tail = call.getCallExprTail();
+            if (tail != null && depth < MAX_DEPTH)
+            {
+                ASTNode tailNode = tail.getNode();
+                boolean rethrow = tailNode.findChildByType(C3Types.BANG) != null;
+                boolean force = !rethrow && tailNode.findChildByType(C3Types.BANGBANG) != null;
+                if (rethrow || force)
+                {
+                    // `expr!` (rethrow) and `expr!!` (force unwrap) evaluate to
+                    // the Optional's result type.
+                    InferredType inner = infer(call.getExpr(), depth + 1);
+                    if (inner == null) return null;
+                    if (isOptionalName(inner.getName())) return kindOf(stripOptional(inner.getName()));
+                    return inner;
+                }
+                // `expr~` builds an Optional excuse: the result type comes
+                // from the context, so it stays unknown here.
+                if (tailNode.findChildByType(C3Types.BIT_NOT) != null) return null;
+            }
             // Field access like `a.b`: resolve the member itself.
             C3AccessIdent accessIdent = call.getCallExprTail() != null ? call.getCallExprTail().getAccessIdent() : null;
             if (accessIdent == null) return null;
@@ -2034,8 +2188,8 @@ public final class TypeChecker
             {
                 return null;
             }
-            if (resolved instanceof C3FuncDef funcDef) return returnTypeOf(funcDef);
-            if (resolved instanceof C3MacroDefinition macro) return returnTypeOf(macro);
+            if (resolved instanceof C3FuncDef funcDef) return cascadeOptional(call, returnTypeOf(funcDef), depth);
+            if (resolved instanceof C3MacroDefinition macro) return cascadeOptional(call, returnTypeOf(macro), depth);
             return null;
         }
         if (callee instanceof C3PathAtIdentExpr pathAtIdentExpr)
@@ -2052,7 +2206,7 @@ public final class TypeChecker
                 {
                     continue;
                 }
-                if (resolved instanceof C3CallablePsiElement callable) return returnTypeOf(callable);
+                if (resolved instanceof C3CallablePsiElement callable) return cascadeOptional(call, returnTypeOf(callable), depth);
             }
             return null;
         }
@@ -2079,6 +2233,40 @@ public final class TypeChecker
         ShortType returnType = callable.getReturnType();
         if (returnType == null || returnType.getValue() == null) return null;
         return kindOf(returnType.getValue());
+    }
+
+    /**
+     * Cascading: calling a function with an Optional argument only executes
+     * the function when every Optional argument holds a result, so a plain
+     * result type becomes Optional. An already-Optional result stays as is.
+     */
+    private static @Nullable InferredType cascadeOptional(
+            @NotNull C3CallExpr call, @Nullable InferredType result, int depth)
+    {
+        if (result == null || isOptionalName(result.getName()) || depth >= MAX_DEPTH) return result;
+        // `@catch`/`@ok` consume an Optional and return a plain value.
+        C3Expr callee = call.getExpr();
+        if (callee instanceof C3PathAtIdentExpr atExpr && atExpr.getPathAtIdent() != null)
+        {
+            String name = atExpr.getPathAtIdent().getText();
+            if (name != null && (name.strip().equals("@catch") || name.strip().equals("@ok"))) return result;
+        }
+        C3CallExprTail tail = call.getCallExprTail();
+        C3CallInvocation invocation = tail != null ? tail.getCallInvocation() : null;
+        C3CallArgList callArgs = invocation != null ? invocation.getCallArgList() : null;
+        C3ArgList args = callArgs != null ? callArgs.getArgList() : null;
+        if (args == null) return result;
+        for (C3Arg arg : args.getArgList())
+        {
+            C3Expr argExpr = arg.getExpr();
+            if (argExpr == null) continue;
+            InferredType argType = infer(argExpr, depth + 1);
+            if (argType != null && isOptionalName(argType.getName()))
+            {
+                return kindOf(result.getName() + "?");
+            }
+        }
+        return result;
     }
 
     // ------------------------------------------------------------------

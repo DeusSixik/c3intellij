@@ -94,13 +94,16 @@ public final class StructField
             @Nullable C3ModuleDefinition module,
             @NotNull C3Type type)
     {
+        // The full text keeps array/slice/pointer suffixes: a field
+        // `int[] a` is `int[]`, not `int`.
+        String fullText = type.getText().strip();
         C3BaseType baseType = type.getBaseType();
         if (baseType != null && baseType.getPath() == null)
         {
             ModuleName moduleName = module != null ? module.getModuleName() : null;
-            return new FullyQualifiedName(moduleName, baseType.getText());
+            return new FullyQualifiedName(moduleName, fullText);
         }
-        return new FullyQualifiedName(null, type.getText());
+        return new FullyQualifiedName(null, fullText);
     }
 
     private static @Nullable String joinDot(@Nullable String parentName, @Nullable String fieldName)

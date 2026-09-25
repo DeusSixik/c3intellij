@@ -110,7 +110,7 @@ public abstract class C3MacroDefinitionMixinImpl extends C3StubBasedPsiElementBa
 		if (s != null) return s.getReturnType();
 		C3OptionalType optType = getMacroHeader().getOptionalType();
 		if (optType == null) return null;
-		return ShortType.from(optType.getType());
+		return ShortType.fromOptionalType(optType);
 	}
 
 	@Override

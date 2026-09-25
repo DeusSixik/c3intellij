@@ -54,7 +54,7 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 				? ShortType.from(psi.getFuncHeader().getFuncName().getType())
 				: null,
 			FullyQualifiedName.from(psi.getFuncHeader(), ModuleName.from(psi)),
-			ShortType.from(psi.getFuncHeader().getOptionalType().getType()),
+			ShortType.fromOptionalType(psi.getFuncHeader().getOptionalType()),
 			ParamType.toParamTypeList(
 				psi.getFnParameterList().getParameterList() != null
 					? psi.getFnParameterList().getParameterList().getParamDeclList()

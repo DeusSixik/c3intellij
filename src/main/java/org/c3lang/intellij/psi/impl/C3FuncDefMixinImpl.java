@@ -108,8 +108,7 @@ public abstract class C3FuncDefMixinImpl extends C3StubBasedPsiElementBase<C3Fun
 	{
 		C3FuncDefStub s = getGreenStub();
 		if (s != null) return s.getReturnType();
-		C3Type t = getFuncHeader().getOptionalType().getType();
-		return ShortType.from(t);
+		return ShortType.fromOptionalType(getFuncHeader().getOptionalType());
 	}
 
 	@Override

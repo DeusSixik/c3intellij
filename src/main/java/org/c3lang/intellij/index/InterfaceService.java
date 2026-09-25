@@ -66,23 +66,32 @@ public final class InterfaceService
         List<C3StructDeclaration> result = new ArrayList<>();
         if (DumbService.isDumb(project)) return result;
         String query = structType.getFullName();
-        for (String key : StubIndex.getInstance().getAllKeys(StructDeclarationIndex.KEY, project))
+        try
         {
-            if (key.equals(query) || key.endsWith("::" + query))
+            for (String key : StubIndex.getInstance().getAllKeys(StructDeclarationIndex.KEY, project))
             {
-                for (C3PsiElement element : StubIndex.getElements(
-                        StructDeclarationIndex.KEY,
-                        key,
-                        project,
-                        C3ProjectService.getInstance(project).getSearchScope(),
-                        C3PsiElement.class))
+                if (key.equals(query) || key.endsWith("::" + query))
                 {
-                    if (element instanceof C3StructDeclaration declaration && !result.contains(declaration))
+                    for (C3PsiElement element : StubIndex.getElements(
+                            StructDeclarationIndex.KEY,
+                            key,
+                            project,
+                            C3ProjectService.getInstance(project).getSearchScope(),
+                            C3PsiElement.class))
                     {
-                        result.add(declaration);
+                        if (element instanceof C3StructDeclaration declaration && !result.contains(declaration))
+                        {
+                            result.add(declaration);
+                        }
                     }
                 }
             }
+        }
+        catch (Exception ignored)
+        {
+            // A stale index entry (e.g. a file indexed before it was
+            // recognised as C3) must not break highlighting; the worst case
+            // is a partial result until the next reindex.
         }
         return result;
     }
@@ -130,24 +139,31 @@ public final class InterfaceService
         List<C3InterfaceDefinition> result = new ArrayList<>();
         if (DumbService.isDumb(project)) return result;
         String query = iface.getFullName();
-        for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
+        try
         {
-            if (!key.equals(query) && !key.endsWith("::" + query)) continue;
-            for (C3PsiElement element : StubIndex.getElements(
-                    TypeIndex.KEY,
-                    key,
-                    project,
-                    C3ProjectService.getInstance(project).getSearchScope(),
-                    C3PsiElement.class))
+            for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
             {
-                if (element instanceof C3TypeName typeName
-                    && typeName.getParent() instanceof C3InterfaceDefinition definition
-                    && isSameInterface(definition, iface)
-                    && !result.contains(definition))
+                if (!key.equals(query) && !key.endsWith("::" + query)) continue;
+                for (C3PsiElement element : StubIndex.getElements(
+                        TypeIndex.KEY,
+                        key,
+                        project,
+                        C3ProjectService.getInstance(project).getSearchScope(),
+                        C3PsiElement.class))
                 {
-                    result.add(definition);
+                    if (element instanceof C3TypeName typeName
+                        && typeName.getParent() instanceof C3InterfaceDefinition definition
+                        && isSameInterface(definition, iface)
+                        && !result.contains(definition))
+                    {
+                        result.add(definition);
+                    }
                 }
             }
+        }
+        catch (Exception ignored)
+        {
+            // See findStructDeclarations: never break highlighting on index issues.
         }
         return result;
     }
