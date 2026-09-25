@@ -603,4 +603,52 @@ public class C3CompletionTest extends BasePlatformTestCase
 			1, lookupStrings.stream().filter(s -> s.equals("myname")).count());
 		assertTrue("Should suggest field 'x', got: " + lookupStrings, lookupStrings.contains("x"));
 	}
+
+	public void testIntVectorMethodCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			fn void main()
+			{
+				int[<2>] ivec = { 23, 11 };
+				ivec.<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'sum', got: " + lookupStrings, lookupStrings.contains("sum"));
+		assertTrue("Should suggest 'max', got: " + lookupStrings, lookupStrings.contains("max"));
+		assertTrue("Should suggest 'dot', got: " + lookupStrings, lookupStrings.contains("dot"));
+		assertTrue("Should suggest 'comp_lt', got: " + lookupStrings, lookupStrings.contains("comp_lt"));
+		assertTrue("Should not suggest 'length' for integer vectors, got: " + lookupStrings,
+			!lookupStrings.contains("length"));
+		assertTrue("Should not suggest 'normalize' for integer vectors, got: " + lookupStrings,
+			!lookupStrings.contains("normalize"));
+	}
+
+	public void testFloatVectorMethodCompletion()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			fn void main()
+			{
+				double[<3>] dvec = { 1.0, 2.0, 3.0 };
+				dvec.<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'sum', got: " + lookupStrings, lookupStrings.contains("sum"));
+		assertTrue("Should suggest 'length' for float vectors, got: " + lookupStrings,
+			lookupStrings.contains("length"));
+		assertTrue("Should suggest 'normalize' for float vectors, got: " + lookupStrings,
+			lookupStrings.contains("normalize"));
+		assertTrue("Should suggest 'lerp', got: " + lookupStrings, lookupStrings.contains("lerp"));
+	}
 }

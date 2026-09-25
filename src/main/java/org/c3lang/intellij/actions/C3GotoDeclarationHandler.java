@@ -14,7 +14,7 @@ public final class C3GotoDeclarationHandler implements GotoDeclarationHandler
 		@Nullable PsiElement sourceElement,
 		int offset,
 		@Nullable Editor editor)
-	{ 
+	{
 		if (sourceElement instanceof C3Arg)
 		{
 			ReferencesSearch.search(sourceElement).findAll();

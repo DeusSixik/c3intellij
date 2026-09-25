@@ -657,10 +657,10 @@ public final class TypeChecker
     private static final java.util.regex.Pattern ARRAY_PATTERN =
         java.util.regex.Pattern.compile("^(.+)\\[(\\d+|\\*|)\\]$");
 
-    private static final class VectorInfo
+    public static final class VectorInfo
     {
-        final @NotNull String element;
-        final long size;
+        public final @NotNull String element;
+        public final long size;
 
         VectorInfo(@NotNull String element, long size)
         {
@@ -669,9 +669,9 @@ public final class TypeChecker
         }
     }
 
-    private static @Nullable VectorInfo parseVector(@NotNull String typeText)
+    public static @Nullable VectorInfo parseVector(@NotNull String typeText)
     {
-        java.util.regex.Matcher matcher = VECTOR_PATTERN.matcher(typeText);
+        java.util.regex.Matcher matcher = VECTOR_PATTERN.matcher(normalize(typeText));
         if (!matcher.matches()) return null;
         String element = matcher.group(1);
         if (element.isEmpty()) return null;
@@ -679,9 +679,19 @@ public final class TypeChecker
         return new VectorInfo(element, size.equals("*") ? -1 : Long.parseLong(size));
     }
 
+    public static boolean isIntegerType(@NotNull String typeText)
+    {
+        return INT_TYPES.containsKey(shortName(normalize(typeText)));
+    }
+
+    public static boolean isFloatType(@NotNull String typeText)
+    {
+        return FLOAT_TYPES.containsKey(shortName(normalize(typeText)));
+    }
+
     private static boolean isVectorName(@NotNull String typeText)
     {
-        return VECTOR_PATTERN.matcher(typeText).matches();
+        return VECTOR_PATTERN.matcher(normalize(typeText)).matches();
     }
 
     private static @Nullable VectorInfo parseArray(@NotNull String typeText)
