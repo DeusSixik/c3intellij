@@ -1,10 +1,19 @@
 package org.c3lang.intellij.annotation;
 
 import com.intellij.codeInsight.daemon.impl.HighlightInfo;
+import com.intellij.codeInsight.intention.preview.IntentionPreviewInfo;
+import com.intellij.lang.annotation.HighlightSeverity;
 import com.intellij.openapi.editor.colors.TextAttributesKey;
+import com.intellij.psi.util.PsiTreeUtil;
 import com.intellij.testFramework.fixtures.BasePlatformTestCase;
 import org.c3lang.intellij.C3SyntaxHighlighter;
+import org.c3lang.intellij.annotation.fix.AddDynamicAttributeFix;
+import org.c3lang.intellij.annotation.fix.AddSelfParameterFix;
+import org.c3lang.intellij.psi.C3FuncDef;
+import org.c3lang.intellij.psi.C3FuncDefinition;
+import org.jetbrains.annotations.NotNull;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public class C3AnnotatorTest extends BasePlatformTestCase
@@ -58,6 +67,354 @@ public class C3AnnotatorTest extends BasePlatformTestCase
 		assertHasHighlight(highlights, "printn", C3SyntaxHighlighter.FUNCTION_CALL_KEY);
 		assertHasHighlight(highlights, "self", C3SyntaxHighlighter.PARAMETER_KEY);
 		assertHasHighlight(highlights, "test", C3SyntaxHighlighter.METHOD_CALL_KEY);
+	}
+
+	public void testMissingDynamicAttributeIsError()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn String Baz.myname(Baz* self)
+			{
+				return "Baz";
+			}
+			""");
+
+		List<HighlightInfo> errors = errorsWithText(myFixture.doHighlighting(), "must be marked '@dynamic'");
+		assertEquals("Expected one missing-@dynamic error, got: " + errors, 1, errors.size());
+	}
+
+	public void testAddDynamicQuickFix()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn String Baz.my<caret>name(Baz* self)
+			{
+				return "Baz";
+			}
+			""");
+
+		myFixture.doHighlighting();
+		myFixture.launchAction(myFixture.findSingleIntention("Add '@dynamic'"));
+		myFixture.checkResult("""
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn String Baz.myname(Baz* self) @dynamic
+			{
+				return "Baz";
+			}
+			""");
+	}
+
+	public void testMissingInterfaceImplIsError()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+			""");
+
+		List<HighlightInfo> errors = errorsWithText(myFixture.doHighlighting(), "does not implement interface method");
+		assertEquals("Expected one missing-impl error, got: " + errors, 1, errors.size());
+	}
+
+	public void testEmptyStructIsError()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+			}
+			""");
+
+		List<HighlightInfo> errors = errorsWithText(myFixture.doHighlighting(), "Zero sized structs are not permitted.");
+		assertEquals("Expected one empty-struct error, got: " + errors, 1, errors.size());
+	}
+
+	public void testCorrectInterfaceImplHasNoErrors()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn void Baz.test(Baz* self)
+			{
+				self.x = 0;
+			}
+
+			fn String Baz.myname(Baz* self) @dynamic
+			{
+				return "Baz";
+			}
+			""");
+
+		List<HighlightInfo> highlights = myFixture.doHighlighting();
+		assertTrue("Unexpected @dynamic error, got: " + highlights,
+			errorsWithText(highlights, "@dynamic").isEmpty());
+		assertTrue("Unexpected missing-impl error, got: " + highlights,
+			errorsWithText(highlights, "does not implement").isEmpty());
+		assertTrue("Unexpected empty-struct error, got: " + highlights,
+			errorsWithText(highlights, "Zero sized").isEmpty());
+	}
+
+	public void testMethodWithoutSelfIsError()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+				int b;
+				int f;
+			}
+
+			fn void Test.test() {
+
+			}
+			""");
+
+		List<HighlightInfo> errors = errorsWithText(myFixture.doHighlighting(), "must start with an argument");
+		assertEquals("Expected one missing-self error, got: " + errors, 1, errors.size());
+	}
+
+	public void testMethodWithWrongFirstParamIsError()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+				int b;
+			}
+
+			fn void Test.test(int x) {
+
+			}
+			""");
+
+		List<HighlightInfo> errors = errorsWithText(myFixture.doHighlighting(), "must start with an argument");
+		assertEquals("Expected one missing-self error, got: " + errors, 1, errors.size());
+	}
+
+	public void testAddSelfParameterQuickFixEmpty()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+				int b;
+				int f;
+			}
+
+			fn void Test.te<caret>st() {
+
+			}
+			""");
+
+		myFixture.doHighlighting();
+		myFixture.launchAction(myFixture.findSingleIntention("Add '&self' parameter"));
+		myFixture.checkResult("""
+			module test;
+
+			struct Test {
+				int b;
+				int f;
+			}
+
+			fn void Test.test(&self) {
+
+			}
+			""");
+	}
+
+	public void testAddSelfParameterQuickFixWithExistingParams()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+				int b;
+			}
+
+			fn void Test.te<caret>st(int x) {
+
+			}
+			""");
+
+		myFixture.doHighlighting();
+		myFixture.launchAction(myFixture.findSingleIntention("Add '&self' parameter"));
+		myFixture.checkResult("""
+			module test;
+
+			struct Test {
+				int b;
+			}
+
+			fn void Test.test(&self, int x) {
+
+			}
+			""");
+	}
+
+	public void testMethodWithSelfHasNoError()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+				int b;
+				int f;
+			}
+
+			fn void Test.test(Test* self) {
+
+			}
+
+			fn void test() {
+
+			}
+			""");
+
+		List<HighlightInfo> highlights = myFixture.doHighlighting();
+		assertTrue("Unexpected missing-self error, got: " + highlights,
+			errorsWithText(highlights, "must start with an argument").isEmpty());
+	}
+
+	public void testMethodWithAmpSelfHasNoError()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+				int b;
+				int f;
+			}
+
+			fn void Test.test(&self) {
+				self.b = 1;
+			}
+
+			fn void test() {
+
+			}
+			""");
+
+		List<HighlightInfo> highlights = myFixture.doHighlighting();
+		assertTrue("Unexpected missing-self error, got: " + highlights,
+			errorsWithText(highlights, "must start with an argument").isEmpty());
+	}
+
+	public void testSelfParameterFixPreviewDoesNotThrow()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			struct Test {
+				int b;
+			}
+
+			fn void Test.test() {
+
+			}
+			""");
+
+		C3FuncDef funcDef = PsiTreeUtil.findChildOfType(myFixture.getFile(), C3FuncDef.class);
+		assertNotNull(funcDef);
+		AddSelfParameterFix fix = new AddSelfParameterFix(funcDef, "Test", "self");
+		IntentionPreviewInfo preview = fix.generatePreview(myFixture.getProject(), myFixture.getEditor(), myFixture.getFile());
+		assertTrue("Expected a diff preview, got: " + preview, preview instanceof IntentionPreviewInfo.CustomDiff);
+		assertTrue(((IntentionPreviewInfo.CustomDiff) preview).modifiedText().contains("&self"));
+	}
+
+	public void testDynamicAttributeFixPreviewDoesNotThrow()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn String Baz.myname(Baz* self)
+			{
+				return "Baz";
+			}
+			""");
+
+		C3FuncDef funcDef = null;
+		for (C3FuncDef candidate : PsiTreeUtil.findChildrenOfType(myFixture.getFile(), C3FuncDef.class))
+		{
+			if ("myname".equals(candidate.getNameIdent()) && candidate.getParent() instanceof C3FuncDefinition)
+			{
+				funcDef = candidate;
+			}
+		}
+		assertNotNull(funcDef);
+		AddDynamicAttributeFix fix = new AddDynamicAttributeFix(funcDef);
+		IntentionPreviewInfo preview = fix.generatePreview(myFixture.getProject(), myFixture.getEditor(), myFixture.getFile());
+		assertTrue("Expected a diff preview, got: " + preview, preview instanceof IntentionPreviewInfo.CustomDiff);
+		assertTrue(((IntentionPreviewInfo.CustomDiff) preview).modifiedText().contains("@dynamic"));
+	}
+
+	private static @NotNull List<HighlightInfo> errorsWithText(@NotNull List<HighlightInfo> highlights, @NotNull String textPart)
+	{
+		List<HighlightInfo> result = new ArrayList<>();
+		for (HighlightInfo info : highlights)
+		{
+			if (info.getSeverity() == HighlightSeverity.ERROR
+				&& info.getDescription() != null
+				&& info.getDescription().contains(textPart))
+			{
+				result.add(info);
+			}
+		}
+		return result;
 	}
 
 	private static void assertHasHighlight(List<HighlightInfo> highlights, String text, TextAttributesKey key)

@@ -115,6 +115,7 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 			for (int i = 0; i < seq.idents.size(); i++)
 			{
 				String ident = seq.idents.get(i);
+				boolean last = i == seq.idents.size() - 1;
 				structMembers = StructService.INSTANCE.getStructMembers(query + "." + ident, myElement.getProject());
 				C3StructMemberDeclaration member = structMembers.size() == 1 ? structMembers.get(0) : null;
 				if (member != null)
@@ -126,10 +127,71 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 						query = nextType.getFullName();
 						continue;
 					}
+					if (last && !isInvocationCallee())
+					{
+						// Leaf member (e.g. an int field): it is the answer.
+						return new ArrayList<>(structMembers);
+					}
 				}
-				if (i == seq.idents.size() - 1)
+				if (last)
 				{
-					for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(myElement.getContainingFile(), C3FuncDef.class))
+					return lastIdentResults(currentType, ident, structMembers);
+				}
+				// An intermediate segment does not resolve: deeper segments cannot either.
+				return Collections.emptyList();
+			}
+
+			return !structMembers.isEmpty()
+				? new ArrayList<>(structMembers)
+				: Collections.emptyList();
+		}
+
+		private @NotNull Collection<C3PsiElement> lastIdentResults(
+				@NotNull FullyQualifiedName currentType,
+				@NotNull String ident,
+				@NotNull List<C3StructMemberDeclaration> structMembers)
+		{
+			if (isInvocationCallee())
+			{
+				Collection<C3PsiElement> methods = findMethodsForCurrentType(currentType, ident);
+				if (!methods.isEmpty()) return methods;
+				// A field holding a function pointer invoked as `s.cb()`.
+				if (!structMembers.isEmpty()) return new ArrayList<>(structMembers);
+				return Collections.emptyList();
+			}
+			if (!structMembers.isEmpty()) return new ArrayList<>(structMembers);
+			// A method referenced as a value, e.g. `&s.method`.
+			return findMethodsForCurrentType(currentType, ident);
+		}
+
+		private @NotNull Collection<C3PsiElement> findMethodsForCurrentType(
+				@NotNull FullyQualifiedName currentType,
+				@NotNull String ident)
+		{
+			for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(myElement.getContainingFile(), C3FuncDef.class))
+			{
+				if (funcDef.getType() != null && currentType.getSuffixName().equals(funcDef.getType().getValue()))
+				{
+					if (funcDef.getFqName().getName().endsWith("." + ident))
+					{
+						return List.of(funcDef);
+					}
+				}
+			}
+
+			Collection<C3CallablePsiElement> methods =
+				NameIndexService.INSTANCE.findMethodsForType(currentType, ident, myElement.getProject());
+			if (!methods.isEmpty())
+			{
+				return new ArrayList<>(methods);
+			}
+
+			if (currentType.getModule() != null)
+			{
+				C3Module mod = C3ImportPathMixinImpl.findModuleDirectly(currentType.getModule().getValue(), myElement.getProject());
+				if (mod != null)
+				{
+					for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(mod.getContainingFile(), C3FuncDef.class))
 					{
 						if (funcDef.getType() != null && currentType.getSuffixName().equals(funcDef.getType().getValue()))
 						{
@@ -139,40 +201,9 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 							}
 						}
 					}
-
-					Collection<C3CallablePsiElement> methods =
-						NameIndexService.INSTANCE.findMethodsForType(currentType, ident, myElement.getProject());
-					if (!methods.isEmpty())
-					{
-						return new ArrayList<>(methods);
-					}
-
-					if (currentType.getModule() != null)
-					{
-						C3Module mod = C3ImportPathMixinImpl.findModuleDirectly(currentType.getModule().getValue(), myElement.getProject());
-						if (mod != null)
-						{
-							for (C3FuncDef funcDef : PsiTreeUtil.findChildrenOfType(mod.getContainingFile(), C3FuncDef.class))
-							{
-								if (funcDef.getType() != null && currentType.getSuffixName().equals(funcDef.getType().getValue()))
-								{
-									if (funcDef.getFqName().getName().endsWith("." + ident))
-									{
-										return List.of(funcDef);
-									}
-								}
-							}
-						}
-					}
 				}
-				return isInvocationCallee()
-					? findMethodsMatchingAccessName()
-					: findFieldsOrMethodsMatchingAccessName();
 			}
-
-			return !structMembers.isEmpty() || isInvocationCallee()
-				? new ArrayList<>(structMembers)
-				: findFieldsOrMethodsMatchingAccessName();
+			return Collections.emptyList();
 		}
 
 		private @NotNull Collection<C3PsiElement> findMethodsMatchingAccessName()

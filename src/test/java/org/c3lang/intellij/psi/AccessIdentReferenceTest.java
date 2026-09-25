@@ -162,6 +162,159 @@ public class AccessIdentReferenceTest extends BasePlatformTestCase
 		assertEquals("MyTr.test", methods.get(0).getFqName().getName());
 	}
 
+	public void testInterfaceReceiverMethodResolvesInterfaceMethod()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			fn void caller(MyName* named)
+			{
+				named.my<caret>name();
+			}
+			""");
+
+		List<C3CallablePsiElement> methods = instancesOf(resolved, C3CallablePsiElement.class);
+		assertEquals(describe(resolved), 1, methods.size());
+		assertTrue(methods.get(0) instanceof C3FuncDef);
+		assertEquals("myname", methods.get(0).getFqName().getName());
+		assertTrue(methods.get(0).getParent() instanceof C3InterfaceBody);
+	}
+
+	public void testStructMethodImplementingInterfaceResolvesImpl()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn String Baz.myname(Baz* self) @dynamic
+			{
+				return "Baz";
+			}
+
+			fn void caller(Baz baz)
+			{
+				baz.my<caret>name();
+			}
+			""");
+
+		List<C3CallablePsiElement> methods = instancesOf(resolved, C3CallablePsiElement.class);
+		assertEquals(describe(resolved), 1, methods.size());
+		assertEquals("Baz.myname", methods.get(0).getFqName().getName());
+	}
+
+	public void testSelfFieldAccessInInterfaceImpl()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn void Baz.test(Baz* self)
+			{
+				self.<caret>x = 0;
+			}
+			""");
+
+		List<C3StructMemberDeclaration> fields = instancesOf(resolved, C3StructMemberDeclaration.class);
+		assertEquals(describe(resolved), 1, fields.size());
+		assertEquals("x", fields.get(0).getNameIdent());
+	}
+
+	public void testSelfFieldAccessWithAmpSelf()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			struct Baz
+			{
+				int x;
+			}
+
+			fn void Baz.test(&self)
+			{
+				self.<caret>x = 0;
+			}
+			""");
+
+		List<C3StructMemberDeclaration> fields = instancesOf(resolved, C3StructMemberDeclaration.class);
+		assertEquals(describe(resolved), 1, fields.size());
+		assertEquals("x", fields.get(0).getNameIdent());
+	}
+
+	public void testVectorSwizzleDoesNotResolveToUnrelatedStructField()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			struct Baz
+			{
+				int x;
+			}
+
+			struct Test
+			{
+				int b;
+				int f;
+			}
+
+			fn int main(String[] args)
+			{
+				int[<8>] v1 = { 1, 2, 3, 4, 5, 6, 7, 8 };
+				int[<8>] sum = v1;
+				int first = sum.<caret>x;
+				return 0;
+			}
+			""");
+
+		assertTrue("Vector swizzle must not resolve to an unrelated struct field, got: " + describe(resolved),
+			resolved.isEmpty());
+	}
+
+	public void testMissingStructFieldDoesNotResolveToUnrelatedStructField()
+	{
+		List<PsiElement> resolved = resolveAccessIdent("""
+			module test;
+
+			struct Baz
+			{
+				int x;
+			}
+
+			struct Test
+			{
+				int b;
+				int f;
+			}
+
+			fn void caller(Test t)
+			{
+				t.non<caret>existent();
+			}
+			""");
+
+		assertTrue("Missing member must not resolve to an unrelated struct field, got: " + describe(resolved),
+			resolved.isEmpty());
+	}
+
 	private @NotNull List<PsiElement> resolveAccessIdent(@NotNull String code)
 	{
 		myFixture.configureByText("main.c3", code);

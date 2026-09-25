@@ -6,6 +6,7 @@ import com.intellij.psi.stubs.StubIndex;
 import org.c3lang.intellij.project.C3ProjectService;
 import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3BaseType;
+import org.c3lang.intellij.psi.C3FuncDef;
 import org.c3lang.intellij.psi.C3FullyQualifiedNamePsiElement;
 import org.c3lang.intellij.psi.C3Path;
 import org.c3lang.intellij.psi.C3PsiElement;
@@ -65,11 +66,11 @@ public final class NameIndexService
 
         for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
         {
-            if (suffix != null && !key.endsWith(suffix)) continue;
+            if (suffix != null && !key.endsWith(suffix) && (methodName == null || !key.endsWith("::" + methodName))) continue;
             for (C3PsiElement element : getElementsByName(key, project))
             {
-                if (element instanceof C3CallablePsiElement callable
-                    && callable.getType() != null)
+                if (!(element instanceof C3CallablePsiElement callable)) continue;
+                if (callable.getType() != null)
                 {
                     String targetTypeName = callable.getType().getValue();
                     if (targetTypeName.equals(typeName) || targetTypeName.equals(type.getFullName()))
@@ -79,6 +80,15 @@ public final class NameIndexService
                             result.add(callable);
                         }
                     }
+                }
+                else if (callable instanceof C3FuncDef funcDef
+                    && InterfaceService.isInterfaceMethodOf(funcDef, type, typeName)
+                    && (suffix == null || (funcDef.getNameIdent() != null && funcDef.getNameIdent().equals(methodName))))
+                {
+                    // Method declared in a matching interface, e.g. `fn String myname();`
+                    // in `interface MyName` for a `MyName` receiver. Interface methods
+                    // have no owner type, they are matched via the parent interface.
+                    result.add(funcDef);
                 }
             }
         }

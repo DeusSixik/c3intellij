@@ -2,13 +2,16 @@ package org.c3lang.intellij.psi.impl;
 
 import com.intellij.lang.ASTNode;
 import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiReference;
 import com.intellij.psi.impl.source.tree.LeafPsiElement;
 import com.intellij.psi.stubs.IStubElementType;
 import com.intellij.psi.tree.IElementType;
+import org.c3lang.intellij.psi.C3InterfaceImpl;
 import org.c3lang.intellij.psi.C3TypeName;
 import org.c3lang.intellij.psi.C3Types;
 import org.c3lang.intellij.psi.FullyQualifiedName;
 import org.c3lang.intellij.psi.ModuleName;
+import org.c3lang.intellij.psi.reference.C3InterfaceReference;
 import org.c3lang.intellij.stubs.C3TypeEnum;
 import org.c3lang.intellij.stubs.C3TypeNameStub;
 import org.jetbrains.annotations.NotNull;
@@ -64,6 +67,18 @@ public abstract class C3TypeNameMixinImpl extends C3StubBasedPsiElementBase<C3Ty
 		PsiElement last = getLastChild();
 		if (last != null && last.getNode().getElementType() == C3Types.TYPE_IDENT)
 			return (LeafPsiElement) last;
+		return null;
+	}
+
+	@Override
+	public @Nullable PsiReference getReference()
+	{
+		// Interface names in struct contracts (struct Baz (MyName)) navigate
+		// to the interface definition; other type names keep default behavior.
+		if (getParent() instanceof C3InterfaceImpl)
+		{
+			return new C3InterfaceReference((C3TypeName) this);
+		}
 		return null;
 	}
 

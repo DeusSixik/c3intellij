@@ -538,4 +538,69 @@ public class C3CompletionTest extends BasePlatformTestCase
 		String finalText = myFixture.getEditor().getDocument().getText();
 		assertTrue("Should contain std::collections::map::HashMap, got:\n" + finalText, finalText.contains("std::collections::map::HashMap"));
 	}
+
+	public void testInterfaceMethodCompletionOnInterfaceReceiver()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn String Baz.myname(Baz* self) @dynamic
+			{
+				return "Baz";
+			}
+
+			fn void caller(MyName* named)
+			{
+				named.<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest interface method 'myname', got: " + lookupStrings, lookupStrings.contains("myname"));
+	}
+
+	public void testStructMethodCompletionPrefersImpl()
+	{
+		myFixture.configureByText("main.c3", """
+			module test;
+
+			interface MyName {
+				fn String myname();
+			}
+
+			struct Baz (MyName)
+			{
+				int x;
+			}
+
+			fn String Baz.myname(Baz* self) @dynamic
+			{
+				return "Baz";
+			}
+
+			fn void caller(Baz baz)
+			{
+				baz.<caret>
+			}
+			""");
+
+		myFixture.completeBasic();
+		List<String> lookupStrings = myFixture.getLookupElementStrings();
+		assertNotNull("Lookup strings should not be null", lookupStrings);
+		assertTrue("Should suggest 'myname', got: " + lookupStrings, lookupStrings.contains("myname"));
+		assertEquals("Should suggest 'myname' exactly once, got: " + lookupStrings,
+			1, lookupStrings.stream().filter(s -> s.equals("myname")).count());
+		assertTrue("Should suggest field 'x', got: " + lookupStrings, lookupStrings.contains("x"));
+	}
 }

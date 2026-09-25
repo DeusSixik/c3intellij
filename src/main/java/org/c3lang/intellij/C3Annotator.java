@@ -5,11 +5,26 @@ import com.intellij.lang.annotation.AnnotationHolder;
 import com.intellij.lang.annotation.Annotator;
 import com.intellij.lang.annotation.HighlightSeverity;
 import com.intellij.openapi.editor.colors.TextAttributesKey;
+import com.intellij.openapi.project.DumbService;
+import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.tree.TokenSet;
+import com.intellij.psi.util.PsiTreeUtil;
+import org.c3lang.intellij.annotation.fix.AddDynamicAttributeFix;
+import org.c3lang.intellij.annotation.fix.AddSelfParameterFix;
+import org.c3lang.intellij.annotation.fix.ImplementInterfaceMethodsFix;
+import org.c3lang.intellij.index.InterfaceService;
+import org.c3lang.intellij.index.NameIndexService;
 import org.c3lang.intellij.psi.*;
+import org.c3lang.intellij.types.CallChecker;
+import org.c3lang.intellij.types.DuplicateChecker;
+import org.c3lang.intellij.types.InferredType;
+import org.c3lang.intellij.types.TypeChecker;
+
+import java.util.List;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 // TODO move to kotlin after first NPE
 public class C3Annotator implements Annotator
@@ -426,6 +441,339 @@ public class C3Annotator implements Annotator
         {
             annotatePathIdent(pathIdent, annotationHolder);
         }
+        else if (psiElement instanceof C3LocalDeclarationStmt localDecl)
+        {
+            annotateLocalDeclaration(localDecl, annotationHolder);
+        }
+        else if (psiElement instanceof C3BinaryExpr binaryExpr)
+        {
+            annotateAssignment(binaryExpr, annotationHolder);
+        }
+        else if (psiElement instanceof C3ReturnStmt returnStmt)
+        {
+            annotateReturnStmt(returnStmt, annotationHolder);
+        }
+        else if (psiElement instanceof C3CallExpr callExpr)
+        {
+            CallChecker.checkCall(callExpr, annotationHolder);
+        }
+        else if (psiElement instanceof C3StructDeclaration structDecl)
+        {
+            annotateStructDeclaration(structDecl, annotationHolder);
+        }
+        else if (psiElement instanceof C3InterfaceImpl impl)
+        {
+            annotateInterfaceImpl(impl, annotationHolder);
+        }
+        else if (psiElement instanceof C3FuncDef funcDef)
+        {
+            annotateFuncDef(funcDef, annotationHolder);
+        }
+        else if (psiElement instanceof C3MacroDefinition macroDef)
+        {
+            DuplicateChecker.checkMacro(macroDef, annotationHolder);
+        }
+    }
+
+    private void annotateStructDeclaration(@NotNull C3StructDeclaration structDecl, @NotNull AnnotationHolder holder)
+    {
+        C3TypeName typeName = structDecl.getTypeName();
+        C3StructBody body = structDecl.getStructBody();
+        if (body != null && body.getStructMemberDeclarationList().isEmpty())
+        {
+            PsiElement anchor = typeName.getNameIdentifier() != null ? typeName.getNameIdentifier() : typeName;
+            holder.newAnnotation(HighlightSeverity.ERROR, "Zero sized structs are not permitted.")
+                .range(anchor)
+                .create();
+        }
+
+        Project project = structDecl.getProject();
+        if (DumbService.isDumb(project)) return;
+
+        String structName = typeName.getText().strip();
+        FullyQualifiedName structFqn = new FullyQualifiedName(ModuleName.from(structDecl), structName);
+        for (FullyQualifiedName iface : InterfaceService.INSTANCE.getImplementedInterfaces(structFqn, project))
+        {
+            List<C3FuncDef> missing =
+                InterfaceService.INSTANCE.findMissingInterfaceMethods(structFqn, iface, project);
+            for (C3FuncDef missed : missing)
+            {
+                PsiElement anchor = contractAnchor(structDecl, iface, typeName);
+                var annotation = holder.newAnnotation(
+                        HighlightSeverity.ERROR,
+                        "Struct '" + structName + "' does not implement interface method '"
+                            + iface.getFullName() + "." + missed.getNameIdent() + "'.")
+                    .range(anchor);
+                if (missed == missing.get(0))
+                {
+                    annotation.withFix(new ImplementInterfaceMethodsFix(structDecl, iface));
+                }
+                annotation.create();
+            }
+        }
+    }
+
+    private static @NotNull PsiElement contractAnchor(
+            @NotNull C3StructDeclaration structDecl,
+            @NotNull FullyQualifiedName iface,
+            @NotNull C3TypeName fallback)
+    {
+        C3InterfaceImpl impl = structDecl.getInterfaceImpl();
+        if (impl != null)
+        {
+            if (isContractText(impl.getTypeName().getText(), iface)) return impl.getTypeName();
+            for (C3Type contractType : impl.getTypeList())
+            {
+                if (isContractText(contractType.getText(), iface)) return contractType;
+            }
+        }
+        return fallback.getNameIdentifier() != null ? fallback.getNameIdentifier() : fallback;
+    }
+
+    private static boolean isContractText(@NotNull String text, @NotNull FullyQualifiedName iface)
+    {
+        String clean = text.strip();
+        return clean.equals(iface.getFullName())
+            || clean.equals(iface.getName())
+            || clean.endsWith("::" + iface.getName());
+    }
+
+    private void annotateFuncDef(@NotNull C3FuncDef funcDef, @NotNull AnnotationHolder holder)
+    {
+        annotateReturnCoverage(funcDef, holder);
+        DuplicateChecker.checkFunction(funcDef, holder);
+
+        String ownerText = InterfaceService.methodOwnerTypeName(funcDef);
+        if (ownerText == null) return;
+        if (PsiTreeUtil.getParentOfType(funcDef, C3InterfaceBody.class) != null) return;
+
+        Project project = funcDef.getProject();
+        if (DumbService.isDumb(project)) return;
+
+        String implName = funcDef.getNameIdent();
+        if (implName == null) return;
+
+        if (!InterfaceService.firstParameterMatchesOwner(funcDef, ownerText))
+        {
+            String ownerShort = InterfaceService.shortName(ownerText);
+            String paramName = freeSelfParameterName(funcDef);
+            String example = paramName.equals("self") ? "&self" : ownerShort + "* " + paramName;
+            PsiElement anchor = funcDef.getNameIdentifier() != null ? funcDef.getNameIdentifier() : funcDef;
+            holder.newAnnotation(
+                    HighlightSeverity.ERROR,
+                    "Method '" + ownerText + "." + implName + "' must start with an argument of type '"
+                        + ownerText + "', e.g. '" + example + "'.")
+                .range(anchor)
+                .withFix(new AddSelfParameterFix(funcDef, ownerShort, paramName))
+                .create();
+        }
+
+        FullyQualifiedName ownerFqn = InterfaceService.resolveOwnerType(ownerText, ModuleName.from(funcDef));
+        for (FullyQualifiedName iface : InterfaceService.INSTANCE.getImplementedInterfaces(ownerFqn, project))
+        {
+            for (C3FuncDef interfaceMethod : InterfaceService.INSTANCE.getInterfaceMethods(iface, project))
+            {
+                if (!implName.equals(interfaceMethod.getNameIdent())) continue;
+                if (InterfaceService.hasAttribute(funcDef, "dynamic")) return;
+                PsiElement anchor = funcDef.getNameIdentifier() != null ? funcDef.getNameIdentifier() : funcDef;
+                holder.newAnnotation(
+                        HighlightSeverity.ERROR,
+                        "Method '" + ownerText + "." + implName + "' implements interface method '"
+                            + iface.getFullName() + "." + implName + "' and must be marked '@dynamic'.")
+                    .range(anchor)
+                    .withFix(new AddDynamicAttributeFix(funcDef))
+                    .create();
+                return;
+            }
+        }
+    }
+
+    private static @NotNull String freeSelfParameterName(@NotNull C3FuncDef funcDef)
+    {
+        List<String> taken = InterfaceService.collectParameterNames(funcDef);
+        if (!taken.contains("self")) return "self";
+        if (!taken.contains("this")) return "this";
+        return "self_";
+    }
+
+    private void annotateInterfaceImpl(@NotNull C3InterfaceImpl impl, @NotNull AnnotationHolder holder)
+    {
+        Project project = impl.getProject();
+        if (DumbService.isDumb(project)) return;
+        ModuleName contextModule = ModuleName.from(impl);
+
+        C3TypeName firstName = impl.getTypeName();
+        PsiElement firstAnchor = firstName.getNameIdentifier() != null ? firstName.getNameIdentifier() : firstName;
+        checkContractReference(firstAnchor, firstName.getText(), contextModule, project, holder);
+
+        for (C3Type contractType : impl.getTypeList())
+        {
+            PsiElement anchor = contractType;
+            if (contractType.getBaseType() != null && contractType.getBaseType().getNameIdentElement() != null)
+            {
+                anchor = contractType.getBaseType().getNameIdentElement();
+            }
+            checkContractReference(anchor, contractType.getText(), contextModule, project, holder);
+        }
+    }
+
+    private void checkContractReference(
+            @NotNull PsiElement anchor,
+            @NotNull String contractText,
+            @Nullable ModuleName contextModule,
+            @NotNull Project project,
+            @NotNull AnnotationHolder holder)
+    {
+        FullyQualifiedName iface = InterfaceService.parseContractReference(contractText, contextModule);
+        if (iface == null || iface.getName().isEmpty()) return;
+        if (!InterfaceService.INSTANCE.findInterfaceDefinitions(iface, project).isEmpty()) return;
+        if (!InterfaceService.INSTANCE.findTypeDeclarations(iface, project).isEmpty())
+        {
+            holder.newAnnotation(HighlightSeverity.ERROR, "'" + contractText.strip() + "' is not an interface.")
+                .range(anchor)
+                .create();
+            return;
+        }
+        holder.newAnnotation(HighlightSeverity.ERROR, "Unresolved interface '" + contractText.strip() + "'.")
+            .range(anchor)
+            .create();
+    }
+
+    private void annotateLocalDeclaration(@NotNull C3LocalDeclarationStmt decl, @NotNull AnnotationHolder holder)
+    {
+        if (DumbService.isDumb(decl.getProject())) return;
+        C3DeclStmtAfterType after = decl.getDeclStmtAfterType();
+        if (after == null) return;
+        String targetText = decl.getOptionalType().getType().getText();
+        if (targetText.isBlank()) return;
+        boolean nullableTarget = decl.getOptionalType().getNode().findChildByType(C3Types.QUESTION) != null;
+        for (C3LocalDeclAfterType declarator : after.getLocalDeclAfterTypeList())
+        {
+            if (declarator.getNameIdent() != null && declarator.getNameIdent().startsWith("$")) continue;
+            C3Expr init = declarator.getExpr();
+            if (init == null) continue;
+            InferredType source = TypeChecker.infer(init);
+            if (nullableTarget && source != null && source.getKind() == InferredType.Kind.NULL) continue;
+            String error = TypeChecker.assignmentError(decl.getProject(), ModuleName.from(decl), targetText, source);
+            if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(init).create();
+        }
+    }
+
+    private void annotateAssignment(@NotNull C3BinaryExpr binary, @NotNull AnnotationHolder holder)
+    {
+        if (TypeChecker.assignmentOperator(binary) == null) return;
+        if (DumbService.isDumb(binary.getProject())) return;
+        C3Expr rhs = binary.getRight();
+        if (rhs == null) return;
+        String lhsType = assignmentTargetType(binary.getLeft());
+        if (lhsType == null) return;
+        String error = TypeChecker.assignmentError(binary.getProject(), ModuleName.from(binary), lhsType, TypeChecker.infer(rhs));
+        if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(rhs).create();
+    }
+
+    private static @Nullable String assignmentTargetType(@NotNull C3Expr lhs)
+    {
+        if (lhs instanceof C3PathIdentExpr pathIdentExpr)
+        {
+            C3PathIdent pathIdent = pathIdentExpr.getPathIdent();
+            if (pathIdent.getPath() != null) return null;
+            PsiElement resolved;
+            try
+            {
+                resolved = pathIdent.getReference().resolve();
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+            if (resolved == null) return null;
+            return TypeChecker.declaredTypeText(resolved);
+        }
+        if (lhs instanceof C3CallExpr call
+            && call.getCallExprTail() != null
+            && call.getCallExprTail().getCallInvocation() == null
+            && call.getCallExprTail().getAccessIdent() != null)
+        {
+            PsiElement resolved;
+            try
+            {
+                resolved = call.getCallExprTail().getAccessIdent().getReference().resolve();
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+            if (resolved instanceof C3StructMemberDeclaration member && member.getStructPathType() != null)
+            {
+                return member.getStructPathType().getFullName();
+            }
+        }
+        return null;
+    }
+
+    private void annotateReturnStmt(@NotNull C3ReturnStmt ret, @NotNull AnnotationHolder holder)
+    {
+        if (DumbService.isDumb(ret.getProject())) return;
+        C3FuncDef funcDef = TypeChecker.enclosingFunction(ret);
+        if (funcDef == null) return;
+        ShortType returnType = funcDef.getReturnType();
+        String returnText = returnType != null && returnType.getValue() != null ? returnType.getValue() : "void";
+        C3Expr expr = ret.getExpr();
+        if (expr == null)
+        {
+            if (!TypeChecker.isVoidType(returnText))
+            {
+                holder.newAnnotation(
+                        HighlightSeverity.ERROR,
+                        "Expected to return a value of type '" + TypeChecker.shortName(returnText) + "'.")
+                    .range(returnKeywordOrSelf(ret))
+                    .create();
+            }
+            return;
+        }
+        if (TypeChecker.isVoidType(returnText))
+        {
+            holder.newAnnotation(HighlightSeverity.ERROR, "Cannot return a value from a void function.")
+                .range(expr)
+                .create();
+            return;
+        }
+        String error = TypeChecker.returnError(ret.getProject(), ModuleName.from(ret), returnText, TypeChecker.infer(expr));
+        if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(expr).create();
+    }
+
+    private static @NotNull PsiElement returnKeywordOrSelf(@NotNull C3ReturnStmt ret)
+    {
+        ASTNode keyword = ret.getNode().findChildByType(C3Types.KW_RETURN);
+        return keyword != null ? keyword.getPsi() : ret;
+    }
+
+    private void annotateReturnCoverage(@NotNull C3FuncDef funcDef, @NotNull AnnotationHolder holder)
+    {
+        if (DumbService.isDumb(funcDef.getProject())) return;
+        ShortType returnType = funcDef.getReturnType();
+        if (returnType == null || returnType.getValue() == null || TypeChecker.isVoidType(returnType.getValue())) return;
+        PsiElement parent = funcDef.getParent();
+        if (!(parent instanceof C3FuncDefinition definition)
+            || definition.getMacroFuncBody() == null
+            || definition.getMacroFuncBody().getCompoundStatement() == null) return;
+        C3CompoundStatement body = definition.getMacroFuncBody().getCompoundStatement();
+        // Loops may never fall off the end: skip instead of false-positive.
+        if (!PsiTreeUtil.collectElementsOfType(body, C3ForStmt.class).isEmpty()
+            || !PsiTreeUtil.collectElementsOfType(body, C3WhileStmt.class).isEmpty()
+            || !PsiTreeUtil.collectElementsOfType(body, C3ForeachStmt.class).isEmpty()
+            || !PsiTreeUtil.collectElementsOfType(body, C3DoStmt.class).isEmpty()) return;
+        for (C3ReturnStmt ret : PsiTreeUtil.collectElementsOfType(body, C3ReturnStmt.class))
+        {
+            if (funcDef.equals(TypeChecker.enclosingFunction(ret))) return;
+        }
+        PsiElement anchor = funcDef.getNameIdentifier() != null ? funcDef.getNameIdentifier() : funcDef;
+        holder.newAnnotation(
+                HighlightSeverity.ERROR,
+                "Missing return of type '" + TypeChecker.shortName(returnType.getValue())
+                    + "' in function '" + funcDef.getFqName().getName() + "'.")
+            .range(anchor)
+            .create();
     }
 
     private void annotateModulePath(@NotNull PsiElement element, @NotNull AnnotationHolder annotationHolder)

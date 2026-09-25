@@ -102,7 +102,11 @@ public final class TailExprCompletionContributor extends CompletionProvider<Comp
 			{
 				ParamType first = paramTypes.get(0);
 				ShortType ft = first.getType();
-				if (ft != null && (ft.getValue().equals(rootType.getName()) || ft.getValue().equals(rootType.getName() + "*")))
+				// The receiver is implicit: either an explicitly typed self parameter
+				// or a typeless first parameter (`&self`, `self`, `&mutex`, ...).
+				if (ft == null
+					|| ft.getValue().equals(rootType.getName())
+					|| ft.getValue().equals(rootType.getName() + "*"))
 				{
 					startIdx = 1;
 				}

@@ -38,6 +38,7 @@ import org.c3lang.intellij.psi.ParamType;
 import org.c3lang.intellij.psi.ShortType;
 import org.c3lang.intellij.psi.C3ConstDeclarationStmt;
 import org.c3lang.intellij.psi.C3Path;
+import org.c3lang.intellij.psi.C3PathAtIdentExpr;
 import org.c3lang.intellij.psi.C3PathIdent;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
@@ -45,6 +46,8 @@ import org.jetbrains.annotations.Nullable;
 import javax.swing.Icon;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 import static com.intellij.patterns.PlatformPatterns.and;
 import static com.intellij.patterns.PlatformPatterns.psiElement;
@@ -59,6 +62,7 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
 
     private static final ElementPattern<PsiElement> PATTERN = or(
         psiElement().inside(C3CallExpr.class),
+        psiElement().inside(C3PathAtIdentExpr.class),
         and(
             psiElement().inside(C3PathIdentExpr.class),
             psiElement().andNot(
@@ -89,6 +93,13 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
 
         C3ModuleDefinition moduleDefinition = CompletionExtensionsKt.getModuleDefinition(parameters);
         if (moduleDefinition == null) return;
+
+        C3PathAtIdentExpr atLookupTarget = CompletionExtensionsKt.siblingOf(parameters, C3PathAtIdentExpr.class);
+        if (atLookupTarget != null)
+        {
+            addAtMacroCompletions(parameters, atLookupTarget, moduleDefinition, result);
+            return;
+        }
 
         C3PathIdentExpr lookupTarget = CompletionExtensionsKt.siblingOf(parameters, C3PathIdentExpr.class);
         if (lookupTarget == null) return;
@@ -240,6 +251,63 @@ public final class FunctionCompletionContributor extends CompletionProvider<Comp
                         priority
                     )
                 );
+            }
+        }
+    }
+
+    private void addAtMacroCompletions(
+            @NotNull CompletionParameters parameters,
+            @NotNull C3PathAtIdentExpr lookupTarget,
+            @NotNull C3ModuleDefinition moduleDefinition,
+            @NotNull CompletionResultSet result)
+    {
+        var project = parameters.getPosition().getProject();
+
+        String fullText = lookupTarget.getText();
+        int startOffset = lookupTarget.getTextRange().getStartOffset();
+        int caretOffset = parameters.getOffset();
+        String prefix = caretOffset >= startOffset && caretOffset - startOffset <= fullText.length()
+            ? fullText.substring(0, caretOffset - startOffset)
+            : "";
+        prefix = prefix.replace(CompletionExtensionsKt.DUMMY_IDENTIFIER, "").strip();
+        CompletionResultSet scopedResult = result.withPrefixMatcher(prefix);
+
+        Set<String> added = new TreeSet<>();
+        for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
+        {
+            int at = key.indexOf('@');
+            if (at < 0) continue;
+            String name = key.substring(at);
+            if (!name.startsWith("@")) continue;
+            for (C3PsiElement psiElement : StubIndex.getElements(
+                    NameIndex.KEY,
+                    key,
+                    project,
+                    C3ProjectService.getInstance(project).getSearchScope(),
+                    C3PsiElement.class))
+            {
+                if (!(psiElement instanceof C3MacroDefinition macro)) continue;
+                if (!moduleDefinition.containsImportOrSameModule(macro)) continue;
+                if (!added.add(macro.getFqName().getFullName())) continue;
+
+                LookupElementBuilder builder = LookupElementBuilder.create(macro, name)
+                    .withIcon(C3Icons.Nodes.MACRO)
+                    .withPresentableText(name)
+                    .withTypeText(macro.getReturnType() != null ? macro.getReturnType().getFullName() : "")
+                    .withInsertHandler((insertionContext, item) -> {
+                        int end = insertionContext.getTailOffset();
+                        CharSequence chars = insertionContext.getDocument().getCharsSequence();
+                        if (end < chars.length() && chars.charAt(end) == '(')
+                        {
+                            insertionContext.getEditor().getCaretModel().moveToOffset(end + 1);
+                        }
+                        else
+                        {
+                            insertionContext.getDocument().insertString(end, "()");
+                            insertionContext.getEditor().getCaretModel().moveToOffset(end + 1);
+                        }
+                    });
+                scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 10.0));
             }
         }
     }
