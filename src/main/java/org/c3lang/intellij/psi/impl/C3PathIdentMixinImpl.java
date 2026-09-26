@@ -11,6 +11,7 @@ import org.c3lang.intellij.index.NameIndexService;
 import org.c3lang.intellij.index.StructService;
 import org.c3lang.intellij.psi.*;
 import org.c3lang.intellij.psi.reference.C3ReferenceBase;
+import org.c3lang.intellij.types.InferredType;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -79,6 +80,9 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 
 		String myName = getNameIdent();
 		if (myName == null) return null;
+
+		FullyQualifiedName foreachType = findForeachVarType(myName);
+		if (foreachType != null) return foreachType;
 
 		C3FuncDef funcDef = null;
 		C3FuncDefinition funcDefinition = PsiTreeUtil.getParentOfType(this, C3FuncDefinition.class);
@@ -240,6 +244,75 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		return new FullyQualifiedName(fallbackModule, nameIdent);
 	}
 
+	/**
+	 * Type of a {@code foreach} iteration variable, e.g. {@code Entry*} for
+	 * {@code Entry* e} in {@code foreach (... Entry* e : src)}. The nearest
+	 * enclosing {@code foreach} that declares the name wins: either its
+	 * explicit type, or the iterated collection's element type.
+	 */
+	private @Nullable FullyQualifiedName findForeachVarType(@NotNull String myName)
+	{
+		C3ForeachStmt stmt = PsiTreeUtil.getParentOfType(this, C3ForeachStmt.class);
+		while (stmt != null)
+		{
+			FullyQualifiedName declared = foreachDeclaredType(stmt, myName);
+			if (declared != null) return declared;
+			FullyQualifiedName inferred = foreachElementType(stmt, myName);
+			if (inferred != null) return inferred;
+			stmt = PsiTreeUtil.getParentOfType(stmt, C3ForeachStmt.class);
+		}
+		return null;
+	}
+
+	private static @Nullable FullyQualifiedName foreachDeclaredType(
+			@NotNull C3ForeachStmt stmt, @NotNull String myName)
+	{
+		if (stmt.getForeachVars() == null) return null;
+		for (C3ForeachVar var : stmt.getForeachVars().getForeachVarList())
+		{
+			ASTNode ident = var.getNode().findChildByType(C3Types.IDENT);
+			if (ident == null || !myName.equals(ident.getText())) continue;
+			if (var.getOptionalType() == null || var.getOptionalType().getType() == null) return null;
+			String text = var.getOptionalType().getType().getText();
+			if (text == null || text.isBlank()) return null;
+			return FullyQualifiedName.parse(text.strip());
+		}
+		return null;
+	}
+
+	private @Nullable FullyQualifiedName foreachElementType(
+			@NotNull C3ForeachStmt stmt, @NotNull String myName)
+	{
+		if (stmt.getForeachVars() == null || stmt.getExpr() == null) return null;
+		boolean declares = false;
+		for (C3ForeachVar var : stmt.getForeachVars().getForeachVarList())
+		{
+			ASTNode ident = var.getNode().findChildByType(C3Types.IDENT);
+			if (ident != null && myName.equals(ident.getText())) declares = true;
+		}
+		if (!declares) return null;
+		InferredType element = elementTypeOf(stmt.getExpr());
+		if (element == null) return null;
+		return FullyQualifiedName.parse(element.getName());
+	}
+
+	private @Nullable InferredType elementTypeOf(@NotNull C3Expr collection)
+	{
+		InferredType inferred;
+		try
+		{
+			inferred = org.c3lang.intellij.types.TypeChecker.infer(collection);
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+		if (inferred == null) return null;
+		String element = org.c3lang.intellij.types.TypeChecker.arrayElementType(inferred.getName());
+		if (element == null) return null;
+		return org.c3lang.intellij.types.TypeChecker.kindOf(element);
+	}
+
 	@Override
 	public @NotNull List<C3LocalDeclAfterType> findLocalDeclAfterType()
 	{
@@ -349,9 +422,16 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	{
 		if (hasLocalDeclBeforeUse()) return new C3LocalDeclAfterTypeReference(this);
 		if (hasParameterBeforeUse()) return new C3ParameterReference(this);
+		if (hasForeachVarBeforeUse()) return new C3ForeachVarReference(this);
 		if (isCallablePosition()) return new C3FuncNameReference(this);
 		if (isStructMemberAccess()) return new C3StructMemberReference(this);
 		return new C3LocalDeclAfterTypeReference(this);
+	}
+
+	private boolean hasForeachVarBeforeUse()
+	{
+		if (!(this instanceof C3PathIdentMixinImpl mixin)) return false;
+		return mixin.findForeachVar() != null;
 	}
 
 	private static class C3LocalDeclAfterTypeReference extends C3ReferenceBase<C3PathIdent>
@@ -369,6 +449,47 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		}
 	}
 
+	/**
+	 * Declaration site of a {@code foreach} iteration variable, so Find
+	 * Usages and rename work on it like on a local.
+	 */
+	@Nullable C3ForeachVar findForeachVar()
+	{
+		String myName = getNameIdent();
+		if (myName == null) return null;
+		C3ForeachStmt stmt = PsiTreeUtil.getParentOfType(this, C3ForeachStmt.class);
+		while (stmt != null)
+		{
+			if (stmt.getForeachVars() != null)
+			{
+				for (C3ForeachVar var : stmt.getForeachVars().getForeachVarList())
+				{
+					ASTNode ident = var.getNode().findChildByType(C3Types.IDENT);
+					if (ident != null && myName.equals(ident.getText())
+						&& var.getTextOffset() < getTextOffset()) return var;
+				}
+			}
+			stmt = PsiTreeUtil.getParentOfType(stmt, C3ForeachStmt.class);
+		}
+		return null;
+	}
+
+	private static class C3ForeachVarReference extends C3ReferenceBase<C3PathIdent>
+	{
+		C3ForeachVarReference(@NotNull C3PathIdent element)
+		{
+			super(element);
+		}
+
+		@Override
+		public @NotNull Collection<C3PsiElement> multiResolve()
+		{
+			if (!(myElement instanceof C3PathIdentMixinImpl mixin)) return Collections.emptyList();
+			C3ForeachVar var = mixin.findForeachVar();
+			return var != null ? Collections.singletonList(var) : Collections.emptyList();
+		}
+	}
+
 	private static class C3ParameterReference extends C3ReferenceBase<C3PathIdent>
 	{
 		C3ParameterReference(@NotNull C3PathIdent element)
@@ -379,12 +500,24 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		@Override
 		public @NotNull Collection<C3PsiElement> multiResolve()
 		{
+			Collection<C3Parameter> params = null;
 			C3FuncDefinition funcDef =
 				PsiTreeUtil.getParentOfType(myElement, C3FuncDefinition.class);
-			if (funcDef == null) return Collections.emptyList();
+			if (funcDef != null)
+			{
+				params = PsiTreeUtil.collectElementsOfType(funcDef, C3Parameter.class);
+			}
+			else
+			{
+				C3MacroDefinition macroDef =
+					PsiTreeUtil.getParentOfType(myElement, C3MacroDefinition.class);
+				if (macroDef != null)
+				{
+					params = PsiTreeUtil.collectElementsOfType(macroDef, C3Parameter.class);
+				}
+			}
+			if (params == null) return Collections.emptyList();
 
-			Collection<C3Parameter> params =
-				PsiTreeUtil.collectElementsOfType(funcDef, C3Parameter.class);
 			for (C3Parameter param : params)
 			{
 				if (param.getNameIdent() != null && param.getNameIdent().equals(myElement.getNameIdent()))

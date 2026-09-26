@@ -37,10 +37,18 @@ public class C3InterfaceReference extends C3ReferenceBase<C3TypeName>
     {
         String text = myElement.getText();
         if (text == null || text.isBlank()) return Collections.emptyList();
-        List<C3PsiElement> result = new ArrayList<>(
-            InterfaceService.INSTANCE.findInterfaceDefinitions(
-                interfaceNameOf(myElement),
-                myElement.getProject()));
+        ModuleName contextModule = ModuleName.from(myElement);
+        List<ModuleName> imports = ModuleName.getImportList(myElement);
+        List<C3PsiElement> result = new ArrayList<>();
+        for (FullyQualifiedName candidate : InterfaceService.INSTANCE.contractCandidates(text, contextModule, imports))
+        {
+            for (C3InterfaceDefinition definition :
+                InterfaceService.INSTANCE.findInterfaceDefinitions(candidate, myElement.getProject()))
+            {
+                if (!result.contains(definition)) result.add(definition);
+            }
+            if (!result.isEmpty()) return result;
+        }
         return result;
     }
 
@@ -49,10 +57,19 @@ public class C3InterfaceReference extends C3ReferenceBase<C3TypeName>
     {
         if (element instanceof C3InterfaceDefinition definition)
         {
-            FullyQualifiedName target = new FullyQualifiedName(
-                ModuleName.from(definition),
-                definition.getTypeName().getText().strip());
-            return target.equals(interfaceNameOf(myElement));
+            String wanted = myElement.getText().strip();
+            String defName = definition.getTypeName().getText().strip();
+            if (!wanted.endsWith(defName) && !wanted.equals(defName)) return false;
+            ModuleName contextModule = ModuleName.from(myElement);
+            List<ModuleName> imports = ModuleName.getImportList(myElement);
+            for (FullyQualifiedName candidate :
+                InterfaceService.INSTANCE.contractCandidates(wanted, contextModule, imports))
+            {
+                FullyQualifiedName target = new FullyQualifiedName(
+                    ModuleName.from(definition), defName);
+                if (target.equals(candidate)) return true;
+            }
+            return false;
         }
         return super.isReferenceTo(element);
     }

@@ -157,7 +157,9 @@ SHEBANG_COMMENT = "#!" .*
     "$switch" { return C3Types.KW_CT_SWITCH; }
     "$reflect" { return C3Types.KW_CT_REFLECT; }
     "$Typeof" { return C3Types.KW_CT_TYPEOF; }
+    "$typeof" { return C3Types.KW_CT_TYPEOF; }
     "$Typefrom" { return C3Types.KW_CT_TYPEFROM; }
+    "$typefrom" { return C3Types.KW_CT_TYPEFROM; }
     "$vaarg" { return C3Types.KW_CT_VAARG; }
 
     "void" { return C3Types.KW_VOID; }

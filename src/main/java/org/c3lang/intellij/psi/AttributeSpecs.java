@@ -75,7 +75,7 @@ public final class AttributeSpecs
         add("allow_deprecated", false, Target.FUNCTION, Target.METHOD);
         add("benchmark", false, Target.FUNCTION);
         add("bigendian", false, Target.BITSTRUCT);
-        add("builtin", false, Target.FUNCTION, Target.MACRO, Target.GLOBAL, Target.CONST);
+        add("builtin", false, Target.FUNCTION, Target.MACRO, Target.GLOBAL, Target.CONST, Target.FAULT, Target.ALIAS);
         addArgs("callconv", Target.FUNCTION, Target.METHOD);
         addSet("cname", true, LINKABLE);
         add("compact", false, Target.STRUCT, Target.UNION);

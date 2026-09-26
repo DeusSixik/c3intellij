@@ -651,10 +651,13 @@ public class C3Annotator implements Annotator
             String clean = text.strip();
             if (clean.startsWith("&") || clean.startsWith("#"))
             {
+                // A warning, not an error: the compiler accepts such macros
+                // in practice (e.g. stdlib method-macros), the `@` prefix is
+                // merely the recommended style.
                 PsiElement anchor = macroDef.getNameIdentifier() != null ? macroDef.getNameIdentifier() : macroDef;
                 holder.newAnnotation(
-                        HighlightSeverity.ERROR,
-                        "Macro '" + name + "' uses reference/expression parameters and must have a name starting with '@'.")
+                        HighlightSeverity.WARNING,
+                        "Macro '" + name + "' uses reference/expression parameters and should have a name starting with '@'.")
                     .range(anchor)
                     .create();
                 return;
@@ -683,10 +686,11 @@ public class C3Annotator implements Annotator
         Project project = impl.getProject();
         if (DumbService.isDumb(project)) return;
         ModuleName contextModule = ModuleName.from(impl);
+        List<ModuleName> imports = ModuleName.getImportList(impl);
 
         C3TypeName firstName = impl.getTypeName();
         PsiElement firstAnchor = firstName.getNameIdentifier() != null ? firstName.getNameIdentifier() : firstName;
-        checkContractReference(firstAnchor, firstName.getText(), contextModule, project, holder);
+        checkContractReference(firstAnchor, firstName.getText(), contextModule, imports, project, holder);
 
         for (C3Type contractType : impl.getTypeList())
         {
@@ -695,7 +699,7 @@ public class C3Annotator implements Annotator
             {
                 anchor = contractType.getBaseType().getNameIdentElement();
             }
-            checkContractReference(anchor, contractType.getText(), contextModule, project, holder);
+            checkContractReference(anchor, contractType.getText(), contextModule, imports, project, holder);
         }
     }
 
@@ -703,18 +707,26 @@ public class C3Annotator implements Annotator
             @NotNull PsiElement anchor,
             @NotNull String contractText,
             @Nullable ModuleName contextModule,
+            @NotNull List<ModuleName> imports,
             @NotNull Project project,
             @NotNull AnnotationHolder holder)
     {
-        FullyQualifiedName iface = InterfaceService.parseContractReference(contractText, contextModule);
-        if (iface == null || iface.getName().isEmpty()) return;
-        if (!InterfaceService.INSTANCE.findInterfaceDefinitions(iface, project).isEmpty()) return;
-        if (!InterfaceService.INSTANCE.findTypeDeclarations(iface, project).isEmpty())
+        List<FullyQualifiedName> candidates =
+            InterfaceService.INSTANCE.contractCandidates(contractText, contextModule, imports);
+        if (candidates.isEmpty()) return;
+        for (FullyQualifiedName iface : candidates)
         {
-            holder.newAnnotation(HighlightSeverity.ERROR, "'" + contractText.strip() + "' is not an interface.")
-                .range(anchor)
-                .create();
-            return;
+            if (!InterfaceService.INSTANCE.findInterfaceDefinitions(iface, project).isEmpty()) return;
+        }
+        for (FullyQualifiedName iface : candidates)
+        {
+            if (!InterfaceService.INSTANCE.findTypeDeclarations(iface, project).isEmpty())
+            {
+                holder.newAnnotation(HighlightSeverity.ERROR, "'" + contractText.strip() + "' is not an interface.")
+                    .range(anchor)
+                    .create();
+                return;
+            }
         }
         holder.newAnnotation(HighlightSeverity.ERROR, "Unresolved interface '" + contractText.strip() + "'.")
             .range(anchor)
@@ -746,6 +758,8 @@ public class C3Annotator implements Annotator
             return;
         }
         if (nullableTarget && !TypeChecker.isOptionalName(targetText.strip())) targetText = targetText.strip() + "?";
+        String typeofTarget = TypeChecker.resolveTypeofTarget(decl.getOptionalType().getType());
+        if (typeofTarget != null) targetText = typeofTarget;
         for (C3LocalDeclAfterType declarator : after.getLocalDeclAfterTypeList())
         {
             if (declarator.getNameIdent() != null && declarator.getNameIdent().startsWith("$")) continue;
@@ -753,21 +767,47 @@ public class C3Annotator implements Annotator
             if (init == null) continue;
             InferredType source = TypeChecker.infer(init);
             if (nullableTarget && source != null && source.getKind() == InferredType.Kind.NULL) continue;
-            String error = TypeChecker.assignmentError(decl.getProject(), ModuleName.from(decl), targetText, source);
+            String error = TypeChecker.assignmentError(decl.getProject(), ModuleName.from(decl), targetText, source, init);
             if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(init).create();
         }
     }
 
     private void annotateAssignment(@NotNull C3BinaryExpr binary, @NotNull AnnotationHolder holder)
     {
-        if (TypeChecker.assignmentOperator(binary) == null) return;
+        String assignOp = TypeChecker.assignmentOperator(binary);
+        if (assignOp == null) return;
         if (DumbService.isDumb(binary.getProject())) return;
         C3Expr rhs = binary.getRight();
         if (rhs == null) return;
+        // `b = c ? x : y` parses with the assignment as the ternary condition,
+        // but assignment binds loosest in C3: the real right-hand side is the
+        // whole ternary. Walk up while this assignment is the condition.
+        C3TernaryExpr outerTernary = outermostTernaryCondition(binary);
+        if (outerTernary != null) rhs = outerTernary;
         String lhsType = assignmentTargetType(binary.getLeft());
         if (lhsType == null) return;
-        String error = TypeChecker.assignmentError(binary.getProject(), ModuleName.from(binary), lhsType, TypeChecker.infer(rhs));
+        String error = TypeChecker.assignmentError(binary.getProject(), ModuleName.from(binary), lhsType, TypeChecker.infer(rhs), rhs, assignOp);
         if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(rhs).create();
+    }
+
+    /**
+     * Outermost ternary having this assignment as its condition
+     * ({@code b = c ? x : y}), or {@code null}. Parenthesized conditions
+     * ({@code (b = c) ? x : y}) do not qualify: the assignment really is the
+     * condition there.
+     */
+    private static @Nullable C3TernaryExpr outermostTernaryCondition(@NotNull C3BinaryExpr binary)
+    {
+        PsiElement current = binary;
+        C3TernaryExpr result = null;
+        while (current.getParent() instanceof C3TernaryExpr ternary)
+        {
+            List<C3Expr> parts = ternary.getExprList();
+            if (parts.isEmpty() || parts.get(0) != current) break;
+            result = ternary;
+            current = ternary;
+        }
+        return result;
     }
 
     private static @Nullable String assignmentTargetType(@NotNull C3Expr lhs)
@@ -849,7 +889,7 @@ public class C3Annotator implements Annotator
             }
             return;
         }
-        String error = TypeChecker.returnError(ret.getProject(), ModuleName.from(ret), returnText, TypeChecker.infer(expr));
+        String error = TypeChecker.returnError(ret.getProject(), ModuleName.from(ret), returnText, TypeChecker.infer(expr), expr);
         if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(expr).create();
     }
 

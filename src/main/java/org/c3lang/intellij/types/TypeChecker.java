@@ -136,7 +136,38 @@ public final class TypeChecker
             @NotNull String targetText,
             @Nullable InferredType source)
     {
+        return assignmentError(project, contextModule, targetText, source, null);
+    }
+
+    /**
+     * @param useSite the right-hand side expression, for Optional narrowing
+     *                via preceding {@code if (catch)} / {@code if (!x)} guards.
+     */
+    public static @Nullable String assignmentError(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull String targetText,
+            @Nullable InferredType source,
+            @Nullable C3Expr useSite)
+    {
+        return assignmentError(project, contextModule, targetText, source, useSite, null);
+    }
+
+    /**
+     * @param assignOp the assignment operator ({@code "="}, {@code "+="}, ...),
+     *                 for pointer arithmetic ({@code void* += usz}).
+     */
+    public static @Nullable String assignmentError(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull String targetText,
+            @Nullable InferredType source,
+            @Nullable C3Expr useSite,
+            @Nullable String assignOp)
+    {
         if (source == null) return null;
+        source = narrowedSource(useSite, source);
+        if (("+=".equals(assignOp) || "-=".equals(assignOp)) && isPointerArithmetic(targetText, source)) return null;
         Mismatch mismatch = check(project, contextModule, targetText, source);
         if (mismatch == null) return null;
         if (mismatch.intValue != null)
@@ -177,7 +208,22 @@ public final class TypeChecker
             @NotNull String returnTypeText,
             @Nullable InferredType source)
     {
+        return returnError(project, contextModule, returnTypeText, source, null);
+    }
+
+    /**
+     * @param useSite the returned expression, for Optional narrowing via
+     *                preceding {@code if (catch)} / {@code if (!x)} guards.
+     */
+    public static @Nullable String returnError(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull String returnTypeText,
+            @Nullable InferredType source,
+            @Nullable C3Expr useSite)
+    {
         if (source == null) return null;
+        source = narrowedSource(useSite, source);
         Mismatch mismatch = check(project, contextModule, returnTypeText, source);
         if (mismatch == null) return null;
         if (mismatch.intValue != null)
@@ -248,6 +294,8 @@ public final class TypeChecker
             String liftedTarget = isOptionalName(normalize(targetText)) ? target : target + "?";
             return checkCast(project, contextModule, liftedTarget, kindOf(stripOptional(sourceName)), operand);
         }
+        // A `$typeof(...)` cast target is the operand's own type.
+        if (isTypeofTarget(target)) return null;
 
         // Resolve alias/typedef chains on both sides first (§2.5): after
         // resolution the names may simply match.
@@ -281,6 +329,15 @@ public final class TypeChecker
             if (effectiveSource.isLiteral() && BigInteger.ZERO.equals(effectiveSource.getIntValue())) return null;
             return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target)
                 + "': only pointer-sized integers (iptr, uptr) convert to a pointer.");
+        }
+
+        // `typeid` casts like its machine-word self: explicitly to any
+        // pointer, to `bool` and to pointer-sized integers; to smaller
+        // integers only through a lossy `(T)(iptr)` chain; never from
+        // integers/pointers and never to `any`/floats/Strings.
+        if (isTypeidName(resolvedSource) || isTypeidName(resolvedTarget))
+        {
+            return typeidCast(resolvedTarget, resolvedSource, sourceName, target);
         }
 
         if (vectorCastCompatible(resolvedTarget, resolvedSource)) return null;
@@ -473,13 +530,16 @@ public final class TypeChecker
         {
             if (targetVector == null || sourceVector == null) return false;
             if (!namesEqual(targetVector.element, sourceVector.element)) return false;
-            return targetVector.size == sourceVector.size && targetVector.size >= 0;
+            // Equal numeric sizes, or the same symbolic size (`Real[<N>]`).
+            return (targetVector.size == sourceVector.size && targetVector.size >= 0)
+                || targetVector.sizeText.equals(sourceVector.sizeText);
         }
         VectorInfo targetArray = parseArray(resolvedTarget);
         VectorInfo sourceArray = parseArray(resolvedSource);
         if (targetArray == null || sourceArray == null) return false;
         if (!namesEqual(targetArray.element, sourceArray.element)) return false;
-        return targetArray.size == sourceArray.size && targetArray.size >= 0;
+        return (targetArray.size == sourceArray.size && targetArray.size >= 0)
+            || targetArray.sizeText.equals(sourceArray.sizeText);
     }
 
     private static @Nullable String resolveTypedefChain(
@@ -634,6 +694,15 @@ public final class TypeChecker
 
     private static final java.util.regex.Pattern COMPTIME_PARAM_PATTERN =
         java.util.regex.Pattern.compile("\\$[A-Z]");
+
+    /**
+     * Whether the text is a {@code $typeof(...)} type (either letter case).
+     */
+    static boolean isTypeofTarget(@NotNull String typeText)
+    {
+        String clean = normalize(typeText);
+        return (clean.startsWith("$typeof(") || clean.startsWith("$Typeof(")) && clean.endsWith(")");
+    }
 
     /**
      * {@code void*} stays a wildcard behind {@code alias}/{@code typedef}
@@ -993,6 +1062,13 @@ public final class TypeChecker
         String base = stripOptional(target);
         String targetName = shortName(base);
         if (namesEqual(base, source.getName())) return null;
+        // `typeid` never converts implicitly, in any direction: c3c demands
+        // an explicit cast (and rejects most of those too). Plain values
+        // still flow into `typeid?` through the Optional rule below.
+        if (!isOptionalName(target) && (isTypeidName(source.getName()) || isTypeidName(base)))
+        {
+            return new Mismatch(source.getName(), targetName, null, null, -1, -1);
+        }
         // `any` accepts any value (but void is not a value).
         if (base.equals("any") && source.getKind() != InferredType.Kind.VOID) return null;
 
@@ -1080,13 +1156,62 @@ public final class TypeChecker
                 }
                 break;
             case POINTER:
-                if (source.getName().equals("void*") || base.equals("void*")) return null;
+                if (isVoidPointerName(source.getName()) || isVoidPointerName(base)) return null;
                 break;
             case NAMED:
                 if (base.equals("any") || source.getName().equals("any")) return null;
+                // A resolved `void*` member (e.g. `any.ptr`) may arrive as a
+                // qualified NAMED type: it still converts to any pointer.
+                if (isVoidPointerName(source.getName()) && isPlainPointerName(base)) return null;
                 break;
         }
         return new Mismatch(source.getName(), targetName, null, null, -1, -1);
+    }
+
+    /**
+     * Whether the (possibly module-qualified) type name denotes {@code void*}.
+     */
+    private static boolean isVoidPointerName(@NotNull String typeName)
+    {
+        String clean = normalize(typeName);
+        return clean.equals("void*") || clean.endsWith("::void*");
+    }
+
+    /**
+     * Whether the type name denotes {@code typeid} (never module-qualified,
+     * but normalized defensively like the other builtins).
+     */
+    private static boolean isTypeidName(@NotNull String typeName)
+    {
+        return shortName(normalize(typeName)).equals("typeid");
+    }
+
+    /**
+     * Explicit casts involving {@code typeid}, mirroring {@code c3c} (verified
+     * by probing: the reverse direction and {@code any}/float/String targets
+     * are all rejected, sub-word integers need a lossy chain).
+     */
+    private static @Nullable CastDiagnostic typeidCast(
+            @NotNull String resolvedTarget,
+            @NotNull String resolvedSource,
+            @NotNull String sourceName,
+            @NotNull String target)
+    {
+        if (isTypeidName(resolvedSource))
+        {
+            if (isPointerName(resolvedTarget)) return null;
+            if (resolvedTarget.equals("bool")) return null;
+            if (isPointerSizedIntName(resolvedTarget)) return null;
+            String shortTarget = shortName(target);
+            if (isIntegerName(resolvedTarget))
+            {
+                return CastDiagnostic.error("Casting 'typeid' to '" + shortTarget
+                    + "' is not allowed because '" + shortTarget
+                    + "' is smaller than a pointer. Use (" + shortTarget + ")(iptr) if you want this lossy cast.");
+            }
+            return CastDiagnostic.error("You cannot cast 'typeid' to '" + shortTarget + "'.");
+        }
+        return CastDiagnostic.error("You cannot cast '" + shortName(sourceName) + "' to 'typeid'.");
     }
 
     private static final class Mismatch
@@ -1157,6 +1282,17 @@ public final class TypeChecker
         if (underlying != null) return new TargetInfo(underlying, false);
         String typedefTarget = resolveTypedef(target, project, contextModule, 0);
         if (typedefTarget != null) return new TargetInfo(typedefTarget, true);
+        // Optional-wrapped alias (`FloatType?`): resolve the inner type and
+        // re-wrap, so `return *(int*)arg` sees `double?`, not a dead end.
+        if (isOptionalName(target))
+        {
+            String inner = stripOptional(normalize(target));
+            String suffix = normalize(target).endsWith("!") ? "!" : "?";
+            String innerAlias = resolveAlias(inner, project, contextModule, 0);
+            if (innerAlias != null) return new TargetInfo(innerAlias + suffix, false);
+            String innerTypedef = resolveTypedef(inner, project, contextModule, 0);
+            if (innerTypedef != null) return new TargetInfo(innerTypedef + suffix, true);
+        }
         return null;
     }
 
@@ -1167,7 +1303,19 @@ public final class TypeChecker
     {
         String underlying = resolveAlias(sourceName, project, contextModule, 0);
         if (underlying != null) return underlying;
-        return resolveInlineTypedef(sourceName, project, contextModule, 0);
+        String inlineTypedef = resolveInlineTypedef(sourceName, project, contextModule, 0);
+        if (inlineTypedef != null) return inlineTypedef;
+        // Same re-wrap for Optional-wrapped sources (`Alias?` -> `double?`).
+        if (isOptionalName(sourceName))
+        {
+            String inner = stripOptional(normalize(sourceName));
+            String suffix = normalize(sourceName).endsWith("!") ? "!" : "?";
+            String innerAlias = resolveAlias(inner, project, contextModule, 0);
+            if (innerAlias != null) return innerAlias + suffix;
+            String innerInline = resolveInlineTypedef(inner, project, contextModule, 0);
+            if (innerInline != null) return innerInline + suffix;
+        }
+        return null;
     }
 
     /**
@@ -1311,7 +1459,16 @@ public final class TypeChecker
             return evaluateComptimeAlias(typedefType.getExpr());
         }
         String text = type.getText();
-        return text == null || text.isBlank() ? null : text.strip();
+        if (text == null || text.isBlank()) return null;
+        String clean = text.strip();
+        // Since `$typefrom` became a keyword, `$typefrom(...)` parses as a
+        // type rather than a call: an evaluatable form resolves to the
+        // builtin, anything else stays unresolved (lenient downstream).
+        if (clean.startsWith("$typefrom(") || clean.startsWith("$Typefrom("))
+        {
+            return evaluateComptimeAliasText(clean);
+        }
+        return clean;
     }
 
     /**
@@ -1334,8 +1491,23 @@ public final class TypeChecker
         if (args == null || args.getArgList().size() != 1) return null;
         C3Expr arg = args.getArgList().get(0).getExpr();
         if (arg == null) return null;
-        String inner = normalize(arg.getText());
+        return evaluateTypefromInner(normalize(arg.getText()));
+    }
 
+    /**
+     * Text form of the above, for the post-keyword parse where
+     * {@code $typefrom(...)} is a type node rather than a call.
+     */
+    private static @Nullable String evaluateComptimeAliasText(@NotNull String text)
+    {
+        String clean = normalize(text);
+        if ((!clean.startsWith("$typefrom(") && !clean.startsWith("$Typefrom(")) || !clean.endsWith(")")) return null;
+        int open = clean.indexOf('(');
+        return evaluateTypefromInner(clean.substring(open + 1, clean.length() - 1));
+    }
+
+    private static @Nullable String evaluateTypefromInner(@NotNull String inner)
+    {
         java.util.regex.Matcher bitsize = BITSIZE_PATTERN.matcher(inner);
         if (bitsize.matches())
         {
@@ -1450,9 +1622,11 @@ public final class TypeChecker
                         typedefType = typedefDecl.getTypedefType();
                     }
                     if (typedefType == null || typedefType.getGenericParameters() != null) continue;
-                    if (typedefType.getType() != null) continue;
-                    if (!(typedefType.getExpr() instanceof C3CallExpr call)) continue;
-                    String callText = call.getText().toLowerCase(java.util.Locale.ROOT);
+                    String rhsText = typedefType.getType() != null
+                        ? typedefType.getType().getText()
+                        : (typedefType.getExpr() != null ? typedefType.getExpr().getText() : null);
+                    if (rhsText == null) continue;
+                    String callText = rhsText.toLowerCase(java.util.Locale.ROOT);
                     if (callText.contains("typefrom") || callText.contains("typeid") || callText.contains("bitsize"))
                     {
                         return true;
@@ -1566,10 +1740,12 @@ public final class TypeChecker
     private static @Nullable VectorInfo parseArrayPointer(@NotNull String typeText)
     {
         // An array pointer `T[N]*`: array with a trailing star (but not a plain `T*`).
+        // The size may be symbolic (`T[BUF_SIZE]*`); only the unbounded `T[*]`
+        // is not an array pointer.
         String clean = normalize(typeText);
         if (!clean.endsWith("*") || clean.endsWith("**")) return null;
         VectorInfo array = parseArray(clean.substring(0, clean.length() - 1));
-        if (array == null || array.size < 0) return null;
+        if (array == null || array.size == -1) return null;
         return array;
     }
 
@@ -1577,10 +1753,13 @@ public final class TypeChecker
     // Vectors, arrays and initializer lists
     // ------------------------------------------------------------------
 
+    // Array/vector sizes may be symbolic constants (`uint[BUF_SIZE]`), not
+    // just literals: anything up to the closing bracket is a size, classified
+    // by parseSize (numeric, `*`/empty, or symbolic).
     private static final java.util.regex.Pattern VECTOR_PATTERN =
-        java.util.regex.Pattern.compile("^(.+)\\[<(\\d+|\\*)>\\]$");
+        java.util.regex.Pattern.compile("^(.+)\\[<([^\\]]*)>\\]$");
     private static final java.util.regex.Pattern ARRAY_PATTERN =
-        java.util.regex.Pattern.compile("^(.+)\\[(\\d+|\\*|)\\]$");
+        java.util.regex.Pattern.compile("^(.+)\\[([^\\]]*)\\]$");
 
     public static final class VectorInfo
     {
@@ -1616,9 +1795,9 @@ public final class TypeChecker
         if (!matcher.matches()) return null;
         String element = matcher.group(1);
         if (element.isEmpty()) return null;
-        long size = parseSize(matcher.group(2));
-        if (size < -1) return null;
-        return new VectorInfo(element, size, matcher.group(2));
+        // Symbolic sizes (`Real[<N>]`) stay unknown (size -2): callers compare
+        // numerically when known, textually otherwise.
+        return new VectorInfo(element, parseSize(matcher.group(2)), matcher.group(2));
     }
 
     public static boolean isIntegerType(@NotNull String typeText)
@@ -1654,15 +1833,17 @@ public final class TypeChecker
         return VECTOR_PATTERN.matcher(normalize(typeText)).matches();
     }
 
-    private static @Nullable VectorInfo parseArray(@NotNull String typeText)
+    public static @Nullable VectorInfo parseArray(@NotNull String typeText)
     {
         java.util.regex.Matcher matcher = ARRAY_PATTERN.matcher(normalize(typeText));
         if (!matcher.matches()) return null;
         String element = matcher.group(1);
         if (element.isEmpty()) return null;
-        long size = parseSize(matcher.group(2));
-        if (size < -1) return null;
-        return new VectorInfo(element, size, matcher.group(2));
+        String sizeText = matcher.group(2);
+        // Vector syntax (`Real[<4>]`) also matches the brackets: it is not an
+        // array, and must not be treated as one (e.g. by parseArrayPointer).
+        if (sizeText.startsWith("<") && sizeText.endsWith(">")) return null;
+        return new VectorInfo(element, parseSize(sizeText), sizeText);
     }
 
     private static @Nullable Mismatch checkInitList(
@@ -1706,6 +1887,134 @@ public final class TypeChecker
     {
         if ((target.endsWith("?") || target.endsWith("!")) && !target.endsWith("*")) return target.substring(0, target.length() - 1);
         return target;
+    }
+
+    /**
+     * Whether {@code ptr += n} / {@code ptr -= n} is valid pointer arithmetic:
+     * a plain (non-void welcome) pointer target with an integer offset. The
+     * compiler steps by the element size ({@code void*} steps bytes).
+     */
+    private static boolean isPointerArithmetic(@NotNull String targetText, @NotNull InferredType source)
+    {
+        String base = stripOptional(normalize(targetText));
+        if (!isPlainPointerName(base)) return false;
+        if (source.getKind() == InferredType.Kind.INT || source.getKind() == InferredType.Kind.CHAR) return true;
+        String shortSource = shortName(stripOptional(normalize(source.getName())));
+        return isIntegerName(shortSource)
+            || shortSource.equals("usz") || shortSource.equals("isz")
+            || shortSource.equals("uptr") || shortSource.equals("iptr");
+    }
+
+    /**
+     * Unwraps an Optional-typed use when a preceding guard in the same flow
+     * already excluded the fault case: {@code if (catch err = x)} separates
+     * the fault branch, and {@code if (!x)} with a diverging body (return /
+     * continue / break) excludes the falsy case. Mirrors the compiler's
+     * flow-sensitive narrowing; anything unrecognized stays wrapped.
+     * Pure PSI walk, no index access.
+     */
+    static @NotNull InferredType narrowedSource(@Nullable C3Expr useSite, @NotNull InferredType source)
+    {
+        if (useSite == null || !isOptionalName(source.getName())) return source;
+        if (!(useSite instanceof C3PathIdentExpr pathExpr) || pathExpr.getPathIdent().getPath() != null) return source;
+        String name = pathExpr.getPathIdent().getNameIdent();
+        if (name == null || name.isEmpty()) return source;
+        try
+        {
+            if (isNarrowedUse(useSite, name)) return kindOf(stripOptional(normalize(source.getName())));
+        }
+        catch (Exception ignored)
+        {
+        }
+        return source;
+    }
+
+    private static boolean isNarrowedUse(@NotNull C3Expr useSite, @NotNull String name)
+    {
+        int useOffset = useSite.getTextOffset();
+        PsiElement parent = useSite.getParent();
+        int depth = 0;
+        while (parent != null && depth < 10)
+        {
+            if (parent instanceof org.c3lang.intellij.psi.C3CompoundStatement compound)
+            {
+                if (compoundPrecedesWithGuard(compound, useOffset, name)) return true;
+            }
+            parent = parent.getParent();
+            depth++;
+        }
+        return false;
+    }
+
+    private static boolean compoundPrecedesWithGuard(
+            @NotNull org.c3lang.intellij.psi.C3CompoundStatement compound,
+            int useOffset,
+            @NotNull String name)
+    {
+        for (org.c3lang.intellij.psi.C3StatementList statementList : compound.getStatementListList())
+        {
+            for (org.c3lang.intellij.psi.C3Statement stmt : statementList.getStatementList())
+            {
+                if (stmt.getTextOffset() >= useOffset) break;
+                if (stmt.getIfStmt() == null) continue;
+                if (ifNarrows(stmt.getIfStmt(), name)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean ifNarrows(@NotNull org.c3lang.intellij.psi.C3IfStmt ifStmt, @NotNull String name)
+    {
+        org.c3lang.intellij.psi.C3ParenCond paren = ifStmt.getParenCond();
+        if (paren == null || paren.getCond() == null) return false;
+        org.c3lang.intellij.psi.C3Cond cond = paren.getCond();
+        // `if (catch err = x) { fault branch }`: past the statement, the
+        // fault case is separated and `x` holds a plain result.
+        if (cond.getCatchUnwrap() != null && cond.getCatchUnwrap().getCatchUnwrapList() != null)
+        {
+            for (C3Expr caught : cond.getCatchUnwrap().getCatchUnwrapList().getExprList())
+            {
+                if (name.equals(caught.getText().strip())) return true;
+            }
+        }
+        for (org.c3lang.intellij.psi.C3CatchUnwrap unwrap
+            : com.intellij.psi.util.PsiTreeUtil.findChildrenOfType(cond, org.c3lang.intellij.psi.C3CatchUnwrap.class))
+        {
+            if (unwrap.getCatchUnwrapList() == null) continue;
+            for (C3Expr caught : unwrap.getCatchUnwrapList().getExprList())
+            {
+                if (name.equals(caught.getText().strip())) return true;
+            }
+        }
+        // `if (!x) return/continue/break;`: past the statement, `x` is truthy.
+        String condText = cond.getText().replaceAll("\\s+", "");
+        if (condText.equals("(!" + name + ")") && branchDiverges(ifStmt))
+        {
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean branchDiverges(@NotNull org.c3lang.intellij.psi.C3IfStmt ifStmt)
+    {
+        if (ifStmt.getCompoundStatement() != null)
+        {
+            return bodyDiverges(ifStmt.getCompoundStatement().getText());
+        }
+        org.c3lang.intellij.psi.C3Statement single = ifStmt.getStatement();
+        if (single == null) return false;
+        String text = single.getText().strip();
+        return text.startsWith("return") || text.startsWith("continue")
+            || text.startsWith("break") || text.startsWith("goto")
+            || text.startsWith("assert");
+    }
+
+    private static boolean bodyDiverges(@NotNull String bodyText)
+    {
+        String compact = bodyText.replaceAll("\\s+", " ");
+        return compact.contains(" return ") || compact.contains(" continue ")
+            || compact.contains(" break ") || compact.contains(" goto ")
+            || compact.contains(" assert ");
     }
 
     /**
@@ -1771,7 +2080,13 @@ public final class TypeChecker
             return Math.abs(value) <= max;
         }
         Integer sourceBits = FLOAT_TYPES.get(shortName(source.getName()));
-        return sourceBits != null && sourceBits <= targetBits;
+        if (sourceBits != null) return sourceBits <= targetBits;
+        // Any integer type converts to any float implicitly (wide integers
+        // may lose precision, which the compiler accepts).
+        String shortSource = shortName(source.getName());
+        return intWidth(shortSource) >= 0
+            || shortSource.equals("usz") || shortSource.equals("isz")
+            || shortSource.equals("uptr") || shortSource.equals("iptr");
     }
 
     /**
@@ -2333,8 +2648,8 @@ public final class TypeChecker
             return null;
         }
         if (resolved == null) return null;
-        String declared = assignedTypeText(resolved);
-        if (declared != null) return kindOf(declared);
+        InferredType declared = inferDeclaredType(resolved, depth);
+        if (declared != null) return declared;
         if (resolved instanceof C3ConstDeclarationStmt constDecl)
         {
             C3Expr init = constDecl.getExpr();
@@ -2355,8 +2670,8 @@ public final class TypeChecker
             return null;
         }
         if (resolved == null) return null;
-        String declared = assignedTypeText(resolved);
-        if (declared != null) return kindOf(declared);
+        InferredType declared = inferDeclaredType(resolved, depth);
+        if (declared != null) return declared;
         if (resolved instanceof C3EnumConstant enumConstant)
         {
             return enumTypeOf(enumConstant);
@@ -2373,6 +2688,94 @@ public final class TypeChecker
         C3BaseType baseType = enumAccess.getBaseType();
         if (baseType == null) return null;
         return InferredType.of(InferredType.Kind.NAMED, baseType.getText().strip());
+    }
+
+    /**
+     * Declared type of a resolved variable as an inferred type. A
+     * {@code $typeof(expr)} declaration evaluates the operand in place, so
+     * {@code $typeof(*ptr) x} has the pointee type; anything else maps
+     * through {@code kindOf} as before.
+     */
+    private static @Nullable InferredType inferDeclaredType(@NotNull PsiElement resolved, int depth)
+    {
+        C3Type declaredType = declaredTypeOf(resolved);
+        if (declaredType == null)
+        {
+            String declared = assignedTypeText(resolved);
+            return declared != null ? kindOf(declared) : null;
+        }
+        InferredType typeof = inferTypeofType(declaredType, depth);
+        if (typeof != null) return typeof;
+        String declared = assignedTypeText(resolved);
+        return declared != null ? kindOf(declared) : null;
+    }
+
+    private static @Nullable C3Type declaredTypeOf(@NotNull PsiElement resolved)
+    {
+        try
+        {
+            if (resolved instanceof C3LocalDeclAfterType)
+            {
+                C3LocalDeclarationStmt stmt =
+                    PsiTreeUtil.getParentOfType(resolved, C3LocalDeclarationStmt.class);
+                if (stmt == null || stmt.getOptionalType() == null) return null;
+                return stmt.getOptionalType().getType();
+            }
+            if (resolved instanceof C3Parameter parameter) return parameter.getType();
+            if (resolved instanceof C3ParamDecl paramDecl)
+            {
+                return paramDecl.getParameter() != null ? paramDecl.getParameter().getType() : null;
+            }
+            if (resolved instanceof C3ConstDeclarationStmt constDecl) return constDecl.getType();
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        return null;
+    }
+
+    /**
+     * Resolves a {@code $typeof(expr)} type PSI to the operand's type name,
+     * or {@code null} when it is not a {@code $typeof} type or the operand
+     * cannot be inferred. Used to normalize declaration targets before
+     * assignability checking.
+     */
+    public static @Nullable String resolveTypeofTarget(@Nullable C3Type type)
+    {
+        if (type == null) return null;
+        InferredType inferred = inferTypeofType(type, 0);
+        return inferred != null ? inferred.getName() : null;
+    }
+
+    private static @Nullable InferredType inferTypeofType(@NotNull C3Type type, int depth)
+    {
+        if (depth > MAX_DEPTH) return null;
+        C3BaseType baseType;
+        try
+        {
+            baseType = type.getBaseType();
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        if (baseType == null) return null;
+        boolean isTypeof;
+        try
+        {
+            isTypeof = baseType.getNode().findChildByType(C3Types.KW_CT_TYPEOF) != null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        if (!isTypeof) return null;
+        C3Expr operand = baseType.getExpr();
+        if (operand == null) return null;
+        InferredType inferred = infer(operand, depth + 1);
+        if (inferred == null) return null;
+        return kindOf(inferred.getName());
     }
 
     private static @Nullable InferredType enumTypeOf(@NotNull C3EnumConstant enumConstant)
@@ -2418,9 +2821,16 @@ public final class TypeChecker
     /**
      * Declared type of a variable for assignment checking, preserving the
      * Optional suffix: {@code int?} for {@code int? x}, plain text otherwise.
+     * A {@code $typeof(expr)} declaration resolves to the operand's type.
      */
     public static @Nullable String assignedTypeText(@NotNull PsiElement resolved)
     {
+        C3Type declaredType = declaredTypeOf(resolved);
+        if (declaredType != null)
+        {
+            String typeof = resolveTypeofTarget(declaredType);
+            if (typeof != null) return typeof;
+        }
         String base = declaredTypeText(resolved);
         if (base == null) return null;
         if (resolved instanceof C3LocalDeclAfterType)
@@ -2463,6 +2873,8 @@ public final class TypeChecker
             // Field access like `a.b`: resolve the member itself.
             C3AccessIdent accessIdent = call.getCallExprTail() != null ? call.getCallExprTail().getAccessIdent() : null;
             if (accessIdent == null) return null;
+            InferredType builtin = builtinMemberType(call.getExpr(), accessIdent.getNameIdent(), depth);
+            if (builtin != null) return builtin;
             PsiElement resolved = accessIdent.getReference().resolve();
             if (resolved instanceof C3StructMemberDeclaration member && member.getStructPathType() != null)
             {
@@ -2521,6 +2933,42 @@ public final class TypeChecker
             return null;
         }
         return null;
+    }
+
+    /**
+     * Built-in member types that need no declaration lookup: the two fields
+     * of {@code any} ({@code .ptr} is {@code void*}, {@code .type} is
+     * {@code typeid}) and the reflection properties available on a
+     * {@code typeid} value (both compile-time on a type name and run-time on
+     * a {@code typeid} variable, e.g. {@code arg.type.inner}).
+     * Pure inference, no index access.
+     */
+    private static @Nullable InferredType builtinMemberType(
+            @NotNull C3Expr receiver, @Nullable String member, int depth)
+    {
+        if (member == null || depth >= MAX_DEPTH) return null;
+        InferredType receiverType = infer(receiver, depth + 1);
+        if (receiverType == null) return null;
+        String clean = stripOptional(normalize(receiverType.getName()));
+        if (shortName(clean).equals("any"))
+        {
+            if (member.equals("ptr")) return kindOf("void*");
+            if (member.equals("type")) return kindOf("typeid");
+            return null;
+        }
+        if (!shortName(clean).equals("typeid")) return null;
+        return switch (member)
+        {
+            // typeid-valued properties.
+            case "inner", "parentof" -> kindOf("typeid");
+            // Integer-valued properties (sizes, lengths, bounds).
+            case "sizeof", "alignof", "len", "elements", "min", "max" -> kindOf("usz");
+            // String-valued properties.
+            case "nameof", "qnameof" -> kindOf("String");
+            // Anything else (kindof enum, membersof, methods, ...) is a real
+            // type but unmodelled here: unknown, not an error.
+            default -> null;
+        };
     }
 
     private static @Nullable InferredType returnTypeOf(@NotNull C3CallablePsiElement callable)

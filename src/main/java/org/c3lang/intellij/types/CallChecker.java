@@ -445,9 +445,42 @@ public final class CallChecker
                 continue;
             }
             C3Expr expr = arg.getExpr();
+            if (expr != null && isVaargForward(expr))
+            {
+                // `$vasplat` / `$vaarg[...]` forward the caller's variadics:
+                // they fill the callee's `...`, not a positional slot.
+                result.add(new ArgInfo(arg, null, false, true, expr, arg));
+                continue;
+            }
             result.add(new ArgInfo(arg, null, false, false, expr, expr != null ? expr : (PsiElement) arg));
         }
         return result;
+    }
+
+    /**
+     * A variadic forward (`$vasplat`, `$vaarg[...]`, `$vaexpr...`): passes the
+     * caller's variadics into the callee's `...`, not into a positional slot.
+     */
+    private static boolean isVaargForward(@NotNull C3Expr expr)
+    {
+        String text = expr.getText();
+        if (text == null) return false;
+        String clean = text.strip();
+        if (clean.equals("$vasplat") || clean.startsWith("$vasplat ")
+            || clean.startsWith("$vaarg") || clean.startsWith("$vaexpr")) return true;
+        // `$vaarg[i]` parses as an indexed access: check the base.
+        C3Expr base = expr;
+        while (base instanceof C3CallExpr call && call.getCallExprTail() == null) break;
+        if (base instanceof C3CallExpr call)
+        {
+            C3Expr callee = call.getExpr();
+            if (callee != null)
+            {
+                String calleeText = callee.getText();
+                if (calleeText != null && calleeText.strip().startsWith("$vaarg")) return true;
+            }
+        }
+        return clean.endsWith("...") && clean.contains("$");
     }
 
     // ------------------------------------------------------------------
@@ -610,6 +643,8 @@ public final class CallChecker
         if (typeText == null) return;
         InferredType inferred = TypeChecker.infer(arg.expr);
         if (inferred == null) return;
+        if (isGenericTypeParam(arg.expr, inferred)) return;
+        inferred = TypeChecker.narrowedSource(arg.expr, inferred);
         String error = TypeChecker.argumentError(
             project,
             contextModule,
@@ -617,6 +652,62 @@ public final class CallChecker
             typeText,
             inferred);
         if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(arg.expr).create();
+    }
+
+    /**
+     * Whether the inferred argument type is a generic type parameter of an
+     * enclosing module, function or macro (e.g. {@code Key} in
+     * {@code module std::collections::map <Key, Value>}). Its concrete type
+     * is only known at instantiation, so any conversion involving it is
+     * allowed here and checked by the compiler per instantiation.
+     * Pure PSI text walk: no index access.
+     */
+    private static boolean isGenericTypeParam(@NotNull C3Expr argExpr, @NotNull InferredType inferred)
+    {
+        String clean = inferred.getName().strip();
+        int separator = clean.lastIndexOf("::");
+        String shortName = separator >= 0 ? clean.substring(separator + 2) : clean;
+        // Only bare identifiers can be type parameters; pointers, slices,
+        // optionals and the like already carry a concrete shape.
+        if (!shortName.matches("[A-Za-z_][A-Za-z_0-9]*")) return false;
+        PsiElement current = argExpr;
+        while (current != null)
+        {
+            if (current instanceof org.c3lang.intellij.psi.C3ModuleSection section
+                && section.getModule() != null
+                && section.getModule().getGenericDecl() != null)
+            {
+                if (genericDeclNames(section.getModule().getGenericDecl()).contains(shortName)) return true;
+            }
+            if (current instanceof C3FuncDef funcDef && funcDef.getGenericDecl() != null)
+            {
+                if (genericDeclNames(funcDef.getGenericDecl()).contains(shortName)) return true;
+            }
+            if (current instanceof C3MacroDefinition macroDef && macroDef.getGenericDecl() != null)
+            {
+                if (genericDeclNames(macroDef.getGenericDecl()).contains(shortName)) return true;
+            }
+            current = current.getParent();
+        }
+        return false;
+    }
+
+    private static @NotNull java.util.Set<String> genericDeclNames(
+            @NotNull org.c3lang.intellij.psi.C3GenericDecl genericDecl)
+    {
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (org.c3lang.intellij.psi.C3ModuleParam param
+            : genericDecl.getModuleParams().getModuleParamList())
+        {
+            // `Key`, `Value = int`, `Type...`: the parameter name is the
+            // leading identifier of the raw text.
+            String text = param.getText();
+            if (text == null) continue;
+            java.util.regex.Matcher matcher =
+                java.util.regex.Pattern.compile("[A-Za-z_][A-Za-z_0-9]*").matcher(text.strip());
+            if (matcher.find()) names.add(matcher.group());
+        }
+        return names;
     }
 
     private static void error(@NotNull AnnotationHolder holder, @NotNull PsiElement anchor, @NotNull String message)

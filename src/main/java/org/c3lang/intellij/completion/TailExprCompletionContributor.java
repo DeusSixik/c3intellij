@@ -69,12 +69,14 @@ public final class TailExprCompletionContributor extends CompletionProvider<Comp
 		if (lookupTarget == null) return;
 
 		String lookupString = CompletionExtensionsKt.getLookupString(parameters, lookupTarget);
-		FullyQualifiedName rootType = CompletionExtensionsKt.getRootType(lookupTarget);
-		if (rootType == null) return;
-
 		int lastDot = lookupString.lastIndexOf('.');
 		String prefix = lastDot >= 0 ? lookupString.substring(lastDot + 1) : "";
 		CompletionResultSet scopedResult = result.withPrefixMatcher(prefix);
+
+		addBuiltinCompletions(parameters, lookupTarget, lookupString, scopedResult);
+
+		FullyQualifiedName rootType = CompletionExtensionsKt.getRootType(lookupTarget);
+		if (rootType == null) return;
 
 		List<String> idents = List.of(lookupString.substring(lookupString.indexOf('.') + 1).split("\\.", -1));
 
@@ -165,6 +167,83 @@ public final class TailExprCompletionContributor extends CompletionProvider<Comp
 
 			scopedResult.addElement(PrioritizedLookupElement.withPriority(builder, 1.0));
 		}
+	}
+
+	/**
+	 * Built-in members needing no declaration: {@code any} fields, slice
+	 * fields, vector swizzling, scalar methods and type properties (see
+	 * {@link BuiltinMembers}). Runs before the struct/method index lookup and
+	 * never blocks it.
+	 */
+	private static void addBuiltinCompletions(
+			@NotNull CompletionParameters parameters,
+			@NotNull PsiElement lookupTarget,
+			@NotNull String lookupString,
+			@NotNull CompletionResultSet scopedResult)
+	{
+		int lastDot = lookupString.lastIndexOf('.');
+		if (lastDot <= 0) return;
+		String chain = lookupString.substring(0, lastDot);
+		String[] segments;
+		try
+		{
+			segments = chain.split("\\.", -1);
+		}
+		catch (Exception e)
+		{
+			return;
+		}
+		if (segments.length == 0 || segments[0].isEmpty()) return;
+
+		String rootName = plainSegmentName(segments[0]);
+		if (rootName == null) return;
+		String rootType = receiverRawType(lookupTarget);
+		if (rootType == null)
+		{
+			// Possibly a type name (`int.sizeof`): only for a bare single
+			// segment, anything else is an unresolvable expression.
+			if (segments.length == 1 && rootName.equals(chain.strip()))
+			{
+				BuiltinMembers.addTo(scopedResult,
+					BuiltinMembers.forTypeName(chain.strip(), parameters.getPosition().getProject()));
+			}
+			return;
+		}
+		String current = rootType;
+		for (int i = 0; i < segments.length; i++)
+		{
+			String base = plainSegmentName(segments[i]);
+			if (base == null) return;
+			boolean indexed = !base.equals(segments[i].strip());
+			if (i > 0)
+			{
+				if (base.isEmpty()) return;
+				current = BuiltinMembers.stepType(current, base);
+				if (current == null) return;
+			}
+			if (indexed)
+			{
+				String element = BuiltinMembers.indexElementType(current);
+				if (element == null) return;
+				current = element;
+			}
+		}
+		BuiltinMembers.addTo(scopedResult, BuiltinMembers.forValueType(current));
+	}
+
+	/**
+	 * Segment text without any index/call suffix ({@code arr} for
+	 * {@code arr[i]}), or {@code null} for call segments ({@code foo()}),
+	 * which this walk does not follow.
+	 */
+	private static @Nullable String plainSegmentName(@NotNull String segment)
+	{
+		String clean = segment.strip();
+		if (clean.contains("(") || clean.contains(")")) return null;
+		int bracket = clean.indexOf('[');
+		String base = bracket >= 0 ? clean.substring(0, bracket).strip() : clean;
+		if (!base.isEmpty() && !base.matches("[A-Za-z_][A-Za-z_0-9]*")) return null;
+		return base;
 	}
 
 	private enum VectorReturn

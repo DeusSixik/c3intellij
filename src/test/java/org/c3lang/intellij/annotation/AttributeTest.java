@@ -429,6 +429,37 @@ public class AttributeTest extends BasePlatformTestCase
         assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 
+    public void testBuiltinOnFaultdefAndAliasOk()
+    {
+        // Mirrors the stdlib: `faultdef NO_MORE_ELEMENT @builtin;` and
+        // `alias mem @builtin = thread_allocator;`.
+        assertNoAttributeErrors("""
+            module test;
+            faultdef NOT_FOUND @builtin;
+            alias mem @builtin = allocator;
+            """);
+    }
+
+    public void testOperatorComparisonArgsOk()
+    {
+        // Comparison operators are overloadable: `@operator(!=)` and friends
+        // must parse as attribute arguments (matrix.c3 `neq` pattern).
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            struct Matrix2x2
+            {
+                float m;
+            }
+            fn bool Matrix2x2.neq(&self, Matrix2x2 mat2) @operator(!=) => self.m != mat2.m;
+            fn bool Matrix2x2.eq(&self, Matrix2x2 mat2) @operator(==) => self.m == mat2.m;
+            fn bool Matrix2x2.lt(&self, Matrix2x2 mat2) @operator(<) => self.m < mat2.m;
+            fn bool Matrix2x2.gt(&self, Matrix2x2 mat2) @operator(>) => self.m > mat2.m;
+            fn bool Matrix2x2.le(&self, Matrix2x2 mat2) @operator(<=) => self.m <= mat2.m;
+            fn bool Matrix2x2.ge(&self, Matrix2x2 mat2) @operator(>=) => self.m >= mat2.m;
+            """), "requires an argument");
+        assertTrue("Unexpected operator-arg errors, got: " + errors, errors.isEmpty());
+    }
+
     private @NotNull List<HighlightInfo> check(@NotNull String code)
     {
         myFixture.configureByText("main.c3", code);
@@ -448,7 +479,7 @@ public class AttributeTest extends BasePlatformTestCase
                     || description.contains("requires a plain function")
                     || description.contains("only valid for the 'main'")
                     || description.contains("@callconv")
-                    || description.contains("must have a name starting with '@'"))
+                    || description.contains("should have a name starting with '@'"))
                 {
                     problems.add(info);
                 }

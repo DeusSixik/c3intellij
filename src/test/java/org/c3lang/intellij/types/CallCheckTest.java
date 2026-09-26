@@ -158,6 +158,51 @@ public class CallCheckTest extends BasePlatformTestCase
         assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 
+    public void testVaargForwardWithNamedOk()
+    {
+        myFixture.configureByText("main.c3", """
+            module test;
+            struct Map { int x; }
+            macro Map* Map.init_with_key_values(&self, int allocator, ..., uint capacity = 4, float load_factor = 0.5)
+            {
+                return self;
+            }
+            macro Map* Map.tinit(&self, ..., uint capacity = 4, float load_factor = 0.5)
+            {
+                return self.init_with_key_values(1, $vasplat, capacity: capacity, load_factor: load_factor);
+            }
+            """);
+
+        List<HighlightInfo> highlights = myFixture.doHighlighting();
+        assertTrue("Unexpected call error, got: " + highlights,
+            errorsWithText(highlights, "already set").isEmpty());
+    }
+
+    public void testGenericTypeParamArgToVoidStarOk()
+    {
+        // `Key` is a module generic parameter: unknowable before
+        // instantiation, so passing it to `void*` must stay silent
+        // (mirrors hashmap.c3 `allocator::free(map.allocator, entry.key)`).
+        myFixture.configureByText("main.c3", """
+            module test::map <Key, Value>;
+            struct Entry
+            {
+                Key key;
+                Entry* next;
+            }
+            fn void free_it(void* ptr)
+            {
+            }
+            fn void free_entry(Entry* entry)
+            {
+                free_it(entry.key);
+            }
+            """);
+
+        List<HighlightInfo> highlights = myFixture.doHighlighting();
+        assertTrue("Unexpected call errors, got: " + highlights, callErrors(highlights).isEmpty());
+    }
+
     public void testArgTypeMismatchIsError()
     {
         myFixture.configureByText("main.c3", """

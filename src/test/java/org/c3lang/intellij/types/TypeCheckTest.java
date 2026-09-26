@@ -579,7 +579,7 @@ public class TypeCheckTest extends BasePlatformTestCase
             """);
     }
 
-    public void testMacroWithoutAtPrefixIsError()
+    public void testMacroWithoutAtPrefixIsWarning()
     {
         myFixture.configureByText("main.c3", """
             module test;
@@ -593,16 +593,16 @@ public class TypeCheckTest extends BasePlatformTestCase
             """);
 
         List<HighlightInfo> infos = myFixture.doHighlighting();
-        List<String> errors = new ArrayList<>();
+        List<String> warnings = new ArrayList<>();
         for (HighlightInfo info : infos)
         {
-            if (info.getSeverity() == HighlightSeverity.ERROR && info.getDescription() != null
-                && info.getDescription().contains("must have a name starting with '@'"))
+            if (info.getSeverity() == HighlightSeverity.WARNING && info.getDescription() != null
+                && info.getDescription().contains("should have a name starting with '@'"))
             {
-                errors.add(info.getDescription());
+                warnings.add(info.getDescription());
             }
         }
-        assertEquals("Expected one macro-name error, got: " + errors, 1, errors.size());
+        assertEquals("Expected one macro-name warning, got: " + warnings, 1, warnings.size());
     }
 
     public void testAliasOk()
@@ -987,6 +987,339 @@ public class TypeCheckTest extends BasePlatformTestCase
     {
         myFixture.configureByText("main.c3", code);
         return myFixture.doHighlighting();
+    }
+
+    public void testOptionalNarrowedAfterCatchAndFalsyGuardOk()
+    {
+        // Mirrors copy_through_buffer: `if (catch err = len)` separates the
+        // fault branch, `if (!len) return` excludes falsy, so `len` is a
+        // plain `usz` afterwards.
+        assertNoTypeErrors("""
+            module test;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                if (catch err = len)
+                {
+                    return;
+                }
+                if (!len) return;
+                total += len;
+            }
+            """);
+    }
+
+    public void testUnnarrowedOptionalAssignIsStillError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                total += len;
+            }
+            """), "Cannot assign 'usz?' to 'usz'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testIntToFloatReturnOk()
+    {
+        // Mirrors float_from_any: any integer converts to a float implicitly.
+        assertNoTypeErrors("""
+            module test;
+            alias FloatType = double;
+            fn FloatType f()
+            {
+                uint128 u = 1;
+                ushort s = 2;
+                return u;
+            }
+            fn FloatType g()
+            {
+                ushort s = 2;
+                return s;
+            }
+            """);
+    }
+
+    public void testIntToAliasedFloatAcrossFilesOk()
+    {
+        // Mirrors float_from_any: the alias lives in another file of the
+        // same module (formatter.c3 vs formatter_private.c3).
+        myFixture.addFileToProject("fmt.c3", """
+            module test;
+            alias FloatType = double;
+            """);
+        assertNoTypeErrors("""
+            module test;
+            fn FloatType f()
+            {
+                int i = 1;
+                short s = 2;
+                ichar c = 3;
+                return i;
+            }
+            fn FloatType? g(any arg)
+            {
+                return *(int*)arg;
+            }
+            """);
+    }
+
+    public void testTypeidCastsOk()
+    {
+        // Verified against c3c: `typeid` explicitly casts to pointers,
+        // `bool` and pointer-sized integers only.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            struct Type { int x; }
+            fn void foo()
+            {
+                typeid id = int.typeid;
+                uptr a = (uptr)id;
+                iptr b = (iptr)id;
+                usz c = (usz)id;
+                isz d = (isz)id;
+                ulong e = (ulong)id;
+                void* f = (void*)id;
+                Type* g = (Type*)id;
+                bool h = (bool)id;
+            }
+            """), "Cannot cast");
+        assertTrue("Unexpected cast errors, got: " + errors, errors.isEmpty());
+        errors = errorsWithText(check("""
+            module test;
+            struct Type { int x; }
+            fn void foo()
+            {
+                typeid id = int.typeid;
+                uptr a = (uptr)id;
+                iptr b = (iptr)id;
+                usz c = (usz)id;
+                isz d = (isz)id;
+                ulong e = (ulong)id;
+                void* f = (void*)id;
+                Type* g = (Type*)id;
+                bool h = (bool)id;
+            }
+            """), "You cannot cast");
+        assertTrue("Unexpected cast errors, got: " + errors, errors.isEmpty());
+    }
+
+    public void testTypeidCastErrors()
+    {
+        // Sub-word integers need a lossy chain; the reverse direction and
+        // `any`/float/String targets are rejected, like c3c does.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void foo()
+            {
+                typeid id = int.typeid;
+                int a = (int)id;
+            }
+            """), "smaller than a pointer");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+        errors = errorsWithText(check("""
+            module test;
+            fn void foo()
+            {
+                typeid id = int.typeid;
+                String s = (String)id;
+            }
+            """), "You cannot cast 'typeid' to 'String'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+        errors = errorsWithText(check("""
+            module test;
+            fn void foo()
+            {
+                uptr val = 1;
+                typeid id = (typeid)val;
+            }
+            """), "You cannot cast 'uptr' to 'typeid'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+        errors = errorsWithText(check("""
+            module test;
+            fn void foo(any arg)
+            {
+                typeid id = (typeid)arg;
+            }
+            """), "You cannot cast 'any' to 'typeid'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testTypeidImplicitConversionsStillError()
+    {
+        // c3c demands explicit casts everywhere involving `typeid`.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void foo()
+            {
+                typeid id = int.typeid;
+                uptr x = id;
+                void* p = id;
+            }
+            """), "Cannot assign 'typeid'");
+        assertEquals("Expected two errors, got: " + errors, 2, errors.size());
+        errors = errorsWithText(check("""
+            module test;
+            fn void foo(any arg)
+            {
+                any x = arg.type;
+            }
+            """), "Cannot assign");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testWrongReturnThroughOptionalAliasStillError()
+    {
+        myFixture.addFileToProject("fmt.c3", """
+            module test;
+            alias FloatType = double;
+            """);
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn FloatType? g()
+            {
+                return "s";
+            }
+            """), "Cannot return 'String' from function returning 'double'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testVoidPointerArithmeticOk()
+    {
+        // Mirrors formatter_out_collection: `void* += usz` steps bytes.
+        assertNoTypeErrors("""
+            module test;
+            fn void foo()
+            {
+                void* data_ptr;
+                usz size = 4;
+                data_ptr += size;
+            }
+            """);
+    }
+
+    public void testAnyFieldsAndTypeidReflectionOk()
+    {
+        // Mirrors formatter_out_collection: `any` has builtin `.ptr`/`.type`
+        // fields and `typeid` values expose reflection properties.
+        assertNoTypeErrors("""
+            module test;
+            fn void foo(any arg)
+            {
+                typeid inner = arg.type.inner;
+                usz size = inner.sizeof;
+                void* data_ptr = arg.ptr;
+                String* temp = arg.ptr;
+                if (arg.type.kindof == 1) return;
+            }
+            """);
+    }
+
+    public void testVoidPointerToTypedPointerOk()
+    {
+        // Mirrors formatter_out_collection: `String* temp = arg.ptr`.
+        assertNoTypeErrors("""
+            module test;
+            struct Any { void* ptr; }
+            fn void foo(Any arg)
+            {
+                String* temp = arg.ptr;
+                void* back = temp;
+            }
+            """);
+    }
+
+    public void testSymbolicArrayPointerToPointerOk()
+    {
+        // Array sizes are often symbolic constants (`uint[BUF_SIZE]*`):
+        // they convert to plain pointers and slices like numeric ones.
+        assertNoTypeErrors("""
+            module test;
+            const usz BUF_SIZE = 8;
+            fn void take_ptr(uint* p)
+            {
+            }
+            fn void take_slice(uint[] s)
+            {
+            }
+            fn void foo()
+            {
+                uint[BUF_SIZE]* ap;
+                uint[8]* np;
+                take_ptr(ap);
+                take_ptr(np);
+                take_slice(ap);
+            }
+            """);
+    }
+
+    public void testSymbolicArrayPointerSameSizeCastOk()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            const usz BUF_SIZE = 8;
+            fn void foo()
+            {
+                uint[BUF_SIZE]* a;
+                uint[8]* b = (uint[8]*)a;
+            }
+            """), "Cannot cast");
+        assertTrue("Unexpected cast errors, got: " + errors, errors.isEmpty());
+    }
+
+    public void testAddressOfSymbolicArrayToPointerOk()
+    {
+        // `&big` is `uint[BUF_SIZE]*`, which converts to `uint*`.
+        assertNoTypeErrors("""
+            module test;
+            const usz BUF_SIZE = 8;
+            fn void foo()
+            {
+                uint[BUF_SIZE] big;
+                uint* a;
+                a = &big;
+            }
+            """);
+    }
+
+    public void testEnumTernaryBranchesOk()
+    {
+        // Ternary with two `uint*` branches is `uint*`, not `bool`;
+        // unqualified enum constants resolve to the enum type.
+        assertNoTypeErrors("""
+            module test;
+            enum FloatFormatting
+            {
+                FLOAT,
+                EXPONENTIAL,
+                ADAPTIVE,
+                HEX
+            }
+            fn void foo(FloatFormatting formatting, uint* r, uint* a)
+            {
+                uint* b;
+                b = formatting == FLOAT ? r : a;
+            }
+            """);
+    }
+
+    public void testArrayPointerSizeMismatchStillError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void foo()
+            {
+                uint[4]* a;
+                uint[8]* b = a;
+            }
+            """), "Cannot assign 'uint[4]*' to 'uint[8]*'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 
     private void assertNoTypeErrors(@NotNull String code)

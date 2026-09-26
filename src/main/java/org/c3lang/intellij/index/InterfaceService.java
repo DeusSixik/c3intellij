@@ -121,16 +121,48 @@ public final class InterfaceService
             {
                 contractTexts.add(contractType.getText());
             }
+            List<ModuleName> imports = ModuleName.getImportList(declaration);
             for (String text : contractTexts)
             {
-                FullyQualifiedName fqn = parseContractReference(text, structModule);
-                if (fqn != null && !result.contains(fqn))
+                for (FullyQualifiedName fqn : contractCandidates(text, structModule, imports))
                 {
-                    result.add(fqn);
+                    if (!result.contains(fqn)) result.add(fqn);
                 }
             }
         }
         return result;
+    }
+
+    /**
+     * Candidate fully-qualified names for a contract entry. A qualified
+     * {@code mod::Name} pins the module; a bare {@code Name} may live in the
+     * struct's own module or in any imported module (e.g. {@code Printable}
+     * from {@code std::io} via {@code import std::io}), so all are tried.
+     * Pure PSI text walk: no index access, safe from any context.
+     */
+    @NotNull
+    public List<FullyQualifiedName> contractCandidates(
+            @NotNull String text,
+            @Nullable ModuleName structModule,
+            @NotNull List<ModuleName> imports)
+    {
+        FullyQualifiedName pinned = parseContractReference(text, structModule);
+        if (pinned == null || pinned.getName().isEmpty()) return List.of();
+        // A qualified `mod::Name` pins the module; a bare `Name` may live in
+        // the struct's own module or in any imported module, so all are tried.
+        // parseContractReference already stamps bare names with the struct
+        // module, hence the check below goes on the raw text, not the FQN.
+        String clean = stripSuffixes(text);
+        if (clean.contains("::")) return List.of(pinned);
+        // Bare name: own module first, then every imported module.
+        List<FullyQualifiedName> candidates = new ArrayList<>();
+        candidates.add(pinned);
+        for (ModuleName imported : imports)
+        {
+            FullyQualifiedName candidate = new FullyQualifiedName(imported, pinned.getName());
+            if (!candidates.contains(candidate)) candidates.add(candidate);
+        }
+        return candidates;
     }
 
     @NotNull
@@ -141,11 +173,13 @@ public final class InterfaceService
         List<C3InterfaceDefinition> result = new ArrayList<>();
         if (DumbService.isDumb(project)) return result;
         String query = iface.getFullName();
+        String shortQuery = iface.getName();
         try
         {
             for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
             {
-                if (!key.equals(query) && !key.endsWith("::" + query)) continue;
+                if (!key.equals(query) && !key.endsWith("::" + query)
+                    && !key.equals(shortQuery) && !key.endsWith("::" + shortQuery)) continue;
                 for (C3PsiElement element : StubIndex.getElements(
                         TypeIndex.KEY,
                         key,

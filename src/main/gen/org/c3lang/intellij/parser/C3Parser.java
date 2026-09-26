@@ -977,6 +977,13 @@ public class C3Parser implements PsiParser, LightPsiParser {
     if (!r) r = consumeToken(b, SHR);
     if (!r) r = parseTokens(b, 0, LBT, RBT, EQ);
     if (!r) r = attribute_operator_expr_25(b, l + 1);
+    // MANUAL PATCH: NE_OP | GT_OP | LE_OP | GE_OP appended to attribute_operator_expr
+    // in C3.bnf (comparison operators overloadable via @operator); the parser
+    // generator is not wired into the build, so the generated code is patched by hand.
+    if (!r) r = consumeToken(b, NE_OP);
+    if (!r) r = consumeToken(b, GT_OP);
+    if (!r) r = consumeToken(b, LE_OP);
+    if (!r) r = consumeToken(b, GE_OP);
     exit_section_(b, l, m, r, false, null);
     return r;
   }
