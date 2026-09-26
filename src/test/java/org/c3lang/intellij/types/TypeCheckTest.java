@@ -991,9 +991,10 @@ public class TypeCheckTest extends BasePlatformTestCase
 
     public void testOptionalNarrowedAfterCatchAndFalsyGuardOk()
     {
-        // Mirrors copy_through_buffer: `if (catch err = len)` separates the
-        // fault branch, `if (!len) return` excludes falsy, so `len` is a
-        // plain `usz` afterwards.
+        // Mirrors copy_through_buffer: `if (catch err = len)` with an
+        // exhaustive early-exit body narrows `len` to plain `usz` afterwards.
+        // (`if (!len)` on an Optional is rejected by c3c itself, so the only
+        // narrowing guard here is the catch.)
         assertNoTypeErrors("""
             module test;
             fn usz? read_it();
@@ -1005,7 +1006,267 @@ public class TypeCheckTest extends BasePlatformTestCase
                 {
                     return;
                 }
-                if (!len) return;
+                total += len;
+            }
+            """);
+    }
+
+    public void testCatchFallthroughDoesNotNarrow()
+    {
+        // The catch body falls through: `len` may still be faulty afterwards.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                if (catch err = len)
+                {
+                }
+                total += len;
+            }
+            """), "Cannot assign 'usz?' to 'usz'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testCatchConditionalReturnDoesNotNarrow()
+    {
+        // Only one path leaves: the fault may still flow past the if.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                bool cond = true;
+                if (catch err = len)
+                {
+                    if (cond) return;
+                }
+                total += len;
+            }
+            """), "Cannot assign 'usz?' to 'usz'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testCatchExhaustiveBranchesNarrow()
+    {
+        // Every path through nested if/else and switch leaves the scope.
+        assertNoTypeErrors("""
+            module test;
+            faultdef MYERR;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                bool cond = true;
+                if (catch err = len)
+                {
+                    if (cond)
+                    {
+                        return;
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
+                total += len;
+                usz? len2 = read_it();
+                if (catch err2 = len2)
+                {
+                    switch (err2)
+                    {
+                        default:
+                            return;
+                    }
+                }
+                total += len2;
+            }
+            """);
+    }
+
+    public void testCatchInnerLoopBreakDoesNotNarrow()
+    {
+        // The break targets the inner loop: control rejoins the catch body.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                while (true)
+                {
+                    if (catch err = len)
+                    {
+                        while (true)
+                        {
+                            break;
+                        }
+                    }
+                    total += len;
+                }
+            }
+            """), "Cannot assign 'usz?' to 'usz'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testCatchBindingHasFaultType()
+    {
+        // The bound name is a `fault` visible in the body: comparisons and
+        // `~`-rewrap behave, and faults flow into fault parameters.
+        assertNoTypeErrors("""
+            module test;
+            faultdef MYERR;
+            fn usz? read_it();
+            fn void take_fault(fault e)
+            {
+            }
+            fn usz? foo()
+            {
+                usz? len = read_it();
+                if (catch err = len)
+                {
+                    take_fault(err);
+                    if (err == MYERR) return err~;
+                    return err~;
+                }
+                return 0;
+            }
+            """);
+    }
+
+    public void testCatchOnNonOptionalIsError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void foo()
+            {
+                usz len = 1;
+                if (catch err = len)
+                {
+                    return;
+                }
+            }
+            """), "not optional");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testTryOnNonOptionalIsError()
+    {
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn void take(usz x)
+            {
+            }
+            fn void foo()
+            {
+                usz len = 1;
+                if (try t = len)
+                {
+                    take(t);
+                }
+            }
+            """), "optional");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testTryBindingNarrowsInsideOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn usz? read_it();
+            fn void take(usz x)
+            {
+            }
+            fn void foo()
+            {
+                usz? len = read_it();
+                if (try t = len)
+                {
+                    take(t);
+                }
+            }
+            """);
+    }
+
+    public void testTryTestedStaysOptionalInside()
+    {
+        // With a binding, only the bound copy narrows: `len` itself stays
+        // `usz?` inside the block (verified against c3c). Assignment (unlike
+        // cascading calls) observes the wrapped type directly.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz? len = read_it();
+                if (try t = len)
+                {
+                    usz x = len;
+                }
+            }
+            """), "Cannot assign 'usz?' to 'usz'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testTryWithoutBindingNarrowsInsideOk()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn usz? read_it();
+            fn void take(usz x)
+            {
+            }
+            fn void foo()
+            {
+                usz? len = read_it();
+                if (try len)
+                {
+                    take(len);
+                }
+            }
+            """);
+    }
+
+    public void testNoreturnCallNarrowsAfterCatch()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn usz? read_it();
+            fn void die() @noreturn
+            {
+            }
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                if (catch err = len)
+                {
+                    die();
+                }
+                total += len;
+            }
+            """);
+    }
+
+    public void testUnreachableNarrowsAfterCatch()
+    {
+        assertNoTypeErrors("""
+            module test;
+            fn usz? read_it();
+            fn void foo()
+            {
+                usz total;
+                usz? len = read_it();
+                if (catch err = len)
+                {
+                    unreachable();
+                }
                 total += len;
             }
             """);
@@ -1319,6 +1580,90 @@ public class TypeCheckTest extends BasePlatformTestCase
                 uint[8]* b = a;
             }
             """), "Cannot assign 'uint[4]*' to 'uint[8]*'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testTypePropertySizeofOk()
+    {
+        // `Header.sizeof` on the struct name (not a value) is a comptime
+        // constant: narrowing follows its value like c3c does.
+        assertNoTypeErrors("""
+            module test;
+            struct Header
+            {
+                uint flags;
+            }
+            struct Outer
+            {
+                char tag;
+                Header header;
+                uint[4] words;
+            }
+            fn void foo()
+            {
+                uint pos = Header.sizeof;
+                usz a = Header.alignof;
+                usz m = int.max;
+                typeid t = Header.typeid;
+                uint s = Outer.sizeof;
+            }
+            """);
+    }
+
+    public void testInlineTypedefDirectionOk()
+    {
+        // Verified against c3c: `typedef Wrapper = inline char[]` converts
+        // implicitly towards the underlying type only (like struct-inline),
+        // including through Optional wrappers.
+        assertNoTypeErrors("""
+            module test;
+            typedef Wrapper = inline char[];
+            fn void take_chars(char[] c)
+            {
+            }
+            fn void take_opt(char[]? c)
+            {
+            }
+            fn void foo(Wrapper w, Wrapper? ow)
+            {
+                take_chars(w);
+                take_opt(ow);
+            }
+            """);
+    }
+
+    public void testInlineTypedefReverseIsError()
+    {
+        // The reverse direction needs an explicit cast, like c3c demands.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            typedef Wrapper = inline char[];
+            fn void take_wrap(Wrapper w)
+            {
+            }
+            fn void foo()
+            {
+                char[] c;
+                take_wrap(c);
+            }
+            """), "Cannot pass 'char[]' for parameter 'w' of type 'Wrapper'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
+    public void testOversizedStructSizeofStillError()
+    {
+        // A struct that does not fit still errors on narrowing, like c3c.
+        List<HighlightInfo> errors = errorsWithText(check("""
+            module test;
+            struct Big
+            {
+                uint[2000000000] data;
+            }
+            fn void foo()
+            {
+                uint pos = Big.sizeof;
+            }
+            """), "does not fit in type 'uint'");
         assertEquals("Expected one error, got: " + errors, 1, errors.size());
     }
 

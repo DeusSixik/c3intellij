@@ -14,7 +14,8 @@ import java.util.List;
  * {@code foreach} iteration variables resolve to their declaration, carry
  * the declared (or iterated element) type, and support Find Usages; struct
  * contracts resolve through the module's imports (e.g. {@code Printable}
- * from {@code std::io} via {@code import std::io}).
+ * from {@code std::io} via {@code import std::io}); {@code if (catch)} /
+ * {@code if (try)} bindings resolve to their unwrap and support Find Usages.
  */
 public class LocalUsagesTest extends BasePlatformTestCase
 {
@@ -135,5 +136,95 @@ public class LocalUsagesTest extends BasePlatformTestCase
         PsiElement target = contract.getReference().resolve();
         assertTrue("expected interface, got: " + target, target instanceof C3InterfaceDefinition);
         assertEquals("std::io", ModuleName.from((C3PsiElement) target).getValue());
+    }
+
+    public void testCatchBindingResolvesAndFindsUsages()
+    {
+        myFixture.configureByText("main.c3", """
+            module test;
+            fn usz? read_it();
+            fn void take_fault(fault e)
+            {
+            }
+            fn void foo()
+            {
+                usz? len = read_it();
+                if (catch err = len)
+                {
+                    take_fault(err);
+                }
+            }
+            """);
+        C3PathIdent use = null;
+        for (C3PathIdent ident : PsiTreeUtil.findChildrenOfType(myFixture.getFile(), C3PathIdent.class))
+        {
+            if (ident.getText().equals("err")) use = ident;
+        }
+        assertNotNull(use);
+        PsiElement target = use.getReference().resolve();
+        assertTrue("expected catch unwrap, got: " + target, target instanceof C3CatchUnwrap);
+        assertEquals("err", ((C3CatchUnwrap) target).getName());
+        assertEquals("FullyQualifiedName(module=null, name=fault)", String.valueOf(use.findTypeName()));
+        assertEquals(1, ReferencesSearch.search(target).findAll().size());
+    }
+
+    public void testEnumConstantResolvesAndFindsUsages()
+    {
+        // Mirrors log::INFO: a bare enum constant in an argument resolves
+        // to the enum constant (not to an unrelated same-named const), so
+        // navigation and Find Usages land on the declaration.
+        myFixture.configureByText("main.c3", """
+            module test;
+            enum LogPriority : int
+            {
+                VERBOSE,
+                INFO,
+            }
+            const char INFO = 1;
+            macro void call_log(LogPriority prio)
+            {
+            }
+            fn void foo()
+            {
+                call_log(INFO);
+            }
+            """);
+        C3PathConst use = null;
+        for (C3PathConst pathConst : PsiTreeUtil.findChildrenOfType(myFixture.getFile(), C3PathConst.class))
+        {
+            if (pathConst.getText().equals("INFO")) use = pathConst;
+        }
+        assertNotNull(use);
+        PsiElement target = use.getReference().resolve();
+        assertTrue("expected enum constant, got: " + target, target instanceof C3EnumConstant);
+        assertEquals(1, ReferencesSearch.search(target).findAll().size());
+    }
+
+    public void testTryBindingResolvesWithUnwrappedType()
+    {
+        myFixture.configureByText("main.c3", """
+            module test;
+            fn usz? read_it();
+            fn void take(usz x)
+            {
+            }
+            fn void foo()
+            {
+                usz? len = read_it();
+                if (try t = len)
+                {
+                    take(t);
+                }
+            }
+            """);
+        C3PathIdent use = null;
+        for (C3PathIdent ident : PsiTreeUtil.findChildrenOfType(myFixture.getFile(), C3PathIdent.class))
+        {
+            if (ident.getText().equals("t")) use = ident;
+        }
+        assertNotNull(use);
+        PsiElement target = use.getReference().resolve();
+        assertTrue("expected try unwrap, got: " + target, target instanceof C3TryUnwrap);
+        assertEquals("FullyQualifiedName(module=null, name=usz)", String.valueOf(use.findTypeName()));
     }
 }

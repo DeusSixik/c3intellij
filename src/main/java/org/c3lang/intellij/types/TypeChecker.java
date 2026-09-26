@@ -5,12 +5,16 @@ import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
 import com.intellij.psi.PsiElement;
 import com.intellij.psi.PsiReference;
+import com.intellij.psi.PsiComment;
 import com.intellij.psi.PsiWhiteSpace;
 import com.intellij.psi.impl.source.tree.LeafPsiElement;
 import com.intellij.psi.stubs.StubIndex;
 import com.intellij.psi.util.PsiTreeUtil;
 import org.c3lang.intellij.project.C3ProjectService;
+import org.c3lang.intellij.index.NameIndex;
+import org.c3lang.intellij.index.InterfaceService;
 import org.c3lang.intellij.index.TypeIndex;
+import org.c3lang.intellij.psi.AttributeSpecs;
 import org.c3lang.intellij.psi.C3AccessIdent;
 import org.c3lang.intellij.psi.C3AliasTypeDecl;
 import org.c3lang.intellij.psi.C3Arg;
@@ -26,6 +30,15 @@ import org.c3lang.intellij.psi.C3CallInvocation;
 import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3CompoundInitExpr;
 import org.c3lang.intellij.psi.C3ConstDeclarationStmt;
+import org.c3lang.intellij.psi.C3ConstdefDeclaration;
+import org.c3lang.intellij.psi.C3CaseStmt;
+import org.c3lang.intellij.psi.C3CatchUnwrap;
+import org.c3lang.intellij.psi.C3CatchUnwrapMixin;
+import org.c3lang.intellij.psi.C3CompoundStatement;
+import org.c3lang.intellij.psi.C3Cond;
+import org.c3lang.intellij.psi.C3CtIfStmt;
+import org.c3lang.intellij.psi.C3DefaultStmt;
+import org.c3lang.intellij.psi.C3ElsePart;
 import org.c3lang.intellij.psi.C3EnumAccessExpr;
 import org.c3lang.intellij.psi.C3EnumConstant;
 import org.c3lang.intellij.psi.C3EnumDeclaration;
@@ -33,10 +46,13 @@ import org.c3lang.intellij.psi.C3Expr;
 import org.c3lang.intellij.psi.C3FuncDef;
 import org.c3lang.intellij.psi.C3FuncDefinition;
 import org.c3lang.intellij.psi.C3GroupedExpr;
+import org.c3lang.intellij.psi.C3IfStmt;
 import org.c3lang.intellij.psi.C3InitListExpr;
 import org.c3lang.intellij.psi.C3InitializerList;
 import org.c3lang.intellij.psi.C3InterfaceDefinition;
 import org.c3lang.intellij.psi.C3KeywordExpr;
+import org.c3lang.intellij.psi.C3Label;
+import org.c3lang.intellij.psi.C3LambdaDecl;
 import org.c3lang.intellij.psi.C3LambdaDeclExpr;
 import org.c3lang.intellij.psi.C3LambdaDeclShortExpr;
 import org.c3lang.intellij.psi.C3LiteralExpr;
@@ -46,17 +62,27 @@ import org.c3lang.intellij.psi.C3MacroDefinition;
 import org.c3lang.intellij.psi.C3ReturnStmt;
 import org.c3lang.intellij.psi.C3ParamDecl;
 import org.c3lang.intellij.psi.C3Parameter;
+import org.c3lang.intellij.psi.C3ParameterList;
+import org.c3lang.intellij.psi.C3ParenCond;
 import org.c3lang.intellij.psi.C3PathAtIdentExpr;
 import org.c3lang.intellij.psi.C3PathConstExpr;
 import org.c3lang.intellij.psi.C3PathIdent;
 import org.c3lang.intellij.psi.C3PathIdentExpr;
 import org.c3lang.intellij.psi.C3PsiElement;
+import org.c3lang.intellij.psi.C3Statement;
+import org.c3lang.intellij.psi.C3StatementList;
 import org.c3lang.intellij.psi.C3StringExpr;
 import org.c3lang.intellij.psi.C3StructBody;
 import org.c3lang.intellij.psi.C3StructDeclaration;
 import org.c3lang.intellij.psi.C3StructMemberDeclaration;
+import org.c3lang.intellij.psi.C3SwitchBody;
+import org.c3lang.intellij.psi.C3SwitchStmt;
 import org.c3lang.intellij.psi.C3TernaryExpr;
+import org.c3lang.intellij.psi.C3TryUnwrap;
+import org.c3lang.intellij.psi.C3TryUnwrapChain;
+import org.c3lang.intellij.psi.C3TryUnwrapMixin;
 import org.c3lang.intellij.psi.C3Type;
+import org.c3lang.intellij.psi.C3TypeExpr;
 import org.c3lang.intellij.psi.C3TypeName;
 import org.c3lang.intellij.psi.C3TypedefDecl;
 import org.c3lang.intellij.psi.C3TypedefType;
@@ -72,8 +98,10 @@ import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Expression type inference and assignability checks for C3.
@@ -341,6 +369,7 @@ public final class TypeChecker
         }
 
         if (vectorCastCompatible(resolvedTarget, resolvedSource)) return null;
+        if (arrayTypesEqualSize(resolvedTarget, resolvedSource, project, contextModule)) return null;
 
         if (effectiveSource.getKind() == InferredType.Kind.BOOL || resolvedSource.equals("bool"))
         {
@@ -390,11 +419,14 @@ public final class TypeChecker
 
         boolean targetEnum = isEnumName(resolvedTarget, project);
         boolean sourceEnum = isEnumName(resolvedSource, project);
-        if (targetEnum || sourceEnum)
+        boolean sourceConstdef = !sourceEnum && isConstdefName(resolvedSource, project);
+        if (targetEnum || sourceEnum || sourceConstdef)
         {
             if (targetEnum && sourceEnum) return CastDiagnostic.error("Cannot cast enum '" + sourceName
                 + "' to enum '" + shortName(target) + "'.");
-            if (isIntegerName(targetEnum ? resolvedSource : resolvedTarget)
+            // Explicit casts between a constdef and integers are fine, inline
+            // or not (only the implicit form requires `inline`).
+            if (isIntegerName(targetEnum || sourceConstdef ? resolvedSource : resolvedTarget)
                 || isNumericKind(targetEnum ? effectiveSource : kindOf(resolvedTarget))) return null;
             return CastDiagnostic.error("Cannot cast '" + sourceName + "' to '" + shortName(target) + "'.");
         }
@@ -687,7 +719,7 @@ public final class TypeChecker
      * by the compiler per instantiation. Member access like
      * {@code $Type.min} stays unknown (and silent) through normal inference.
      */
-    static boolean isComptimeParam(@NotNull String typeName)
+    public static boolean isComptimeParam(@NotNull String typeName)
     {
         return COMPTIME_PARAM_PATTERN.matcher(normalize(typeName)).find();
     }
@@ -1038,12 +1070,23 @@ public final class TypeChecker
         if (voidStarTransparent(project, contextModule, target, source)) return null;
         if (interfaceAssignable(project, contextModule, target, source)) return null;
         if (isComptimeNumericLenient(target, source, project, contextModule)) return null;
+        // Fixed arrays and vectors of equal length accept each other even
+        // when the size is spelled differently (`uint[16]` vs
+        // `uint[BLOCK_SIZE/uint.sizeof]`).
+        if (arrayTypesEqualSize(target, source.getName(), project, contextModule)) return null;
 
         // Resolve type aliases (and typedefs for literals / inline typedef sources).
         TargetInfo resolvedTarget = resolveTargetType(project, contextModule, target);
         InferredType resolvedSource = source;
         String resolvedSourceName = resolveSourceType(project, contextModule, source.getName());
         if (resolvedSourceName != null) resolvedSource = kindOf(resolvedSourceName);
+        if (resolvedSource == source)
+        {
+            // Values of an `inline` constdef convert through the backing
+            // type, e.g. `Blake3Flags` through `char`.
+            String backing = inlineConstdefBacking(source.getName(), project, contextModule);
+            if (backing != null) resolvedSource = kindOf(backing);
+        }
 
         if (resolvedTarget == null && resolvedSource == source) return direct;
         String finalTarget = resolvedTarget != null ? resolvedTarget.text : target;
@@ -1325,6 +1368,10 @@ public final class TypeChecker
 
     /**
      * Underlying text of a type alias like {@code alias CharPtr = char*;}, or {@code null}.
+     * Composite spellings resolve through their base: {@code CInt*} via
+     * {@code CInt}, {@code Alias[4]} via {@code Alias} (c3c accepts
+     * {@code &nm} for a {@code CInt*} parameter, so the check must see
+     * through the alias).
      */
     static @Nullable String resolveAlias(
             @NotNull String typeName,
@@ -1333,6 +1380,8 @@ public final class TypeChecker
             int depth)
     {
         if (depth > 4 || DumbService.isDumb(project)) return null;
+        String composite = resolveCompositeBase(typeName, project, contextModule, depth, false);
+        if (composite != null) return composite;
         if (!isUserTypeName(typeName)) return null;
         String simpleName = shortName(normalize(typeName));
         NamedTypeDecl match = pickDeclaration(findNamedTypeDecls(simpleName, project), typeName, contextModule);
@@ -1351,6 +1400,8 @@ public final class TypeChecker
             int depth)
     {
         if (depth > 4 || DumbService.isDumb(project)) return null;
+        String composite = resolveCompositeBase(typeName, project, contextModule, depth, true);
+        if (composite != null) return composite;
         if (!isUserTypeName(typeName)) return null;
         NamedTypeDecl match = pickDeclaration(
             findNamedTypeDecls(shortName(normalize(typeName)), project), typeName, contextModule);
@@ -1369,6 +1420,8 @@ public final class TypeChecker
             int depth)
     {
         if (depth > 4 || DumbService.isDumb(project)) return null;
+        String composite = resolveCompositeBase(typeName, project, contextModule, depth, true);
+        if (composite != null) return composite;
         if (!isUserTypeName(typeName)) return null;
         NamedTypeDecl match = pickDeclaration(
             findNamedTypeDecls(shortName(normalize(typeName)), project), typeName, contextModule);
@@ -1390,6 +1443,52 @@ public final class TypeChecker
             case "void", "bool", "char", "String", "ZString", "any", "typeid", "fault" -> false;
             default -> simpleName.matches("[A-Za-z_][A-Za-z_0-9]*");
         };
+    }
+
+    /**
+     * Alias/typedef resolution for composite spellings: strip one outer
+     * suffix (`*`, `[]`, `[N]`, `[<N>]`), resolve the base, re-attach.
+     * Only the alias path applies to every composite; typedefs resolve
+     * through the base as well (their conversions are one-directional but
+     * spelled through the same sugar). Returns {@code null} when the base
+     * is not a resolvable user type, so plain callers keep their behavior.
+     */
+    private static @Nullable String resolveCompositeBase(
+            @NotNull String typeName,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            int depth,
+            boolean includeTypedefs)
+    {
+        String clean = normalize(typeName);
+        String base;
+        String suffix;
+        if (clean.endsWith("*") && !clean.endsWith("**"))
+        {
+            base = clean.substring(0, clean.length() - 1).strip();
+            suffix = "*";
+        }
+        else if (clean.endsWith("[]"))
+        {
+            base = clean.substring(0, clean.length() - 2).strip();
+            suffix = "[]";
+        }
+        else
+        {
+            VectorInfo array = parseArray(clean);
+            VectorInfo vector = array == null ? parseVector(clean) : null;
+            if (array == null && vector == null) return null;
+            base = array != null ? array.element : vector.element;
+            suffix = clean.substring(base.length());
+        }
+        if (!isUserTypeName(base)) return null;
+        String resolved = resolveAlias(base, project, contextModule, depth + 1);
+        if (resolved == null && includeTypedefs)
+        {
+            resolved = resolveInlineTypedef(base, project, contextModule, depth + 1);
+        }
+        if (resolved == null) return null;
+        return resolved + suffix;
     }
 
     private static @Nullable NamedTypeDecl pickDeclaration(
@@ -1459,6 +1558,12 @@ public final class TypeChecker
         C3Type type = typedefType.getType();
         if (type == null)
         {
+            // `alias F = fn int(int);`: the right-hand side is a function
+            // type, not an expression — expose it raw so fn-type aliases
+            // resolve (used by lambda inference and, elsewhere, as a name
+            // that is at least declared).
+            String raw = typedefType.getText();
+            if (raw != null && raw.strip().startsWith("fn ")) return raw.strip();
             // Compile-time computed right-hand side, e.g.
             // `alias CInt = $typefrom(signed_int_from_bitsize($$C_INT_SIZE));`.
             return evaluateComptimeAlias(typedefType.getExpr());
@@ -1652,6 +1757,81 @@ public final class TypeChecker
     }
 
     /**
+     * Backing type of an {@code inline} constdef, e.g. {@code char} for
+     * {@code constdef Blake3Flags : inline char}. Values of an inline
+     * constdef convert to the backing type implicitly (verified against
+     * {@code c3c}); without {@code inline} (or without a backing type) the
+     * constdef is distinct and needs an explicit cast.
+     * Pure index scan with same-module preference, no resolution.
+     */
+    private static @Nullable String inlineConstdefBacking(
+            @NotNull String typeName,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        String clean = normalize(typeName);
+        if (!isUserTypeName(clean) || DumbService.isDumb(project)) return null;
+        String wanted = shortName(clean);
+        C3ConstdefDeclaration best = null;
+        try
+        {
+            for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
+            {
+                if (!key.equals(wanted) && !key.endsWith("::" + wanted)) continue;
+                for (C3PsiElement element : safeElements(TypeIndex.KEY, key, project))
+                {
+                    if (!(element instanceof C3TypeName typeNameElement)) continue;
+                    if (!typeNameElement.getText().strip().equals(wanted)) continue;
+                    if (!(typeNameElement.getParent() instanceof C3ConstdefDeclaration constdef)) continue;
+                    if (best == null) best = constdef;
+                    if (contextModule != null && contextModule.equals(ModuleName.from(constdef))) best = constdef;
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+        if (best == null || !hasInlineModifier(best)) return null;
+        C3Type backing;
+        try
+        {
+            backing = best.getType();
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        if (backing == null) return null;
+        String text = backing.getText();
+        return text == null || text.isBlank() ? null : text.strip();
+    }
+
+    private static boolean isConstdefName(@NotNull String typeName, @NotNull Project project)
+    {
+        String clean = normalize(typeName);
+        if (!isUserTypeName(clean) || DumbService.isDumb(project)) return false;
+        String wanted = shortName(clean);
+        try
+        {
+            for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
+            {
+                if (!key.equals(wanted) && !key.endsWith("::" + wanted)) continue;
+                for (C3PsiElement element : safeElements(TypeIndex.KEY, key, project))
+                {
+                    if (!(element instanceof C3TypeName typeNameElement)) continue;
+                    if (!typeNameElement.getText().strip().equals(wanted)) continue;
+                    if (typeNameElement.getParent() instanceof C3ConstdefDeclaration) return true;
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
+    }
+
+    /**
      * Array/slice/pointer conversions from {@code docs/arrays.md} (same element type required):
      * <ul>
      * <li>{@code T[]} accepts {@code T[]} and {@code T[N]*}</li>
@@ -1794,6 +1974,249 @@ public final class TypeChecker
         }
     }
 
+    /**
+     * Whether two array/vector types have the same element type and equal
+     * lengths, e.g. {@code uint[16]} and {@code uint[BLOCK_SIZE/uint.sizeof]}.
+     * Lengths compare textually, numerically, or by evaluating constant
+     * expressions (literals, {@code const} values, {@code T.sizeof},
+     * {@code +-* / %} with parentheses).
+     */
+    static boolean arrayTypesEqualSize(
+            @NotNull String targetText,
+            @NotNull String sourceText,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        String target = stripOptional(normalize(targetText));
+        String source = stripOptional(normalize(sourceText));
+        VectorInfo targetVector = parseVector(target);
+        VectorInfo sourceVector = parseVector(source);
+        if (targetVector != null || sourceVector != null)
+        {
+            if (targetVector == null || sourceVector == null) return false;
+            if (!namesEqual(targetVector.element, sourceVector.element)) return false;
+            return arraySizesEqual(targetVector.sizeText, sourceVector.sizeText, project, contextModule);
+        }
+        VectorInfo targetArray = parseArray(target);
+        VectorInfo sourceArray = parseArray(source);
+        if (targetArray == null || sourceArray == null) return false;
+        if (!namesEqual(targetArray.element, sourceArray.element)) return false;
+        return arraySizesEqual(targetArray.sizeText, sourceArray.sizeText, project, contextModule);
+    }
+
+    static boolean arraySizesEqual(
+            @NotNull String first,
+            @NotNull String second,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        String cleanFirst = first.strip();
+        String cleanSecond = second.strip();
+        if (cleanFirst.equals(cleanSecond)) return true;
+        Long valueFirst = evalSize(cleanFirst, project, contextModule, 0);
+        if (valueFirst == null) return false;
+        Long valueSecond = evalSize(cleanSecond, project, contextModule, 0);
+        return valueSecond != null && valueFirst.equals(valueSecond);
+    }
+
+    /**
+     * Evaluates a constant size expression to a number: integer literals
+     * (decimal/hex/binary with underscores), {@code const} values by name,
+     * {@code T.sizeof} for primitives and pointers, and {@code +-* / %}
+     * arithmetic with parentheses. Anything else (unknown names, method
+     * calls, overflow) yields {@code null}. Depth-bounded and dumb-safe.
+     */
+    private static @Nullable Long evalSize(
+            @NotNull String text,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            int depth)
+    {
+        if (depth > 4 || DumbService.isDumb(project)) return null;
+        String clean = text.strip();
+        if (clean.isEmpty() || clean.equals("*")) return null;
+        // Parenthesized group.
+        if (clean.startsWith("(") && matchingParen(clean, 0) == clean.length() - 1)
+        {
+            return evalSize(clean.substring(1, clean.length() - 1), project, contextModule, depth + 1);
+        }
+        // Lowest precedence first: `+` and binary `-`.
+        int split = splitBinaryOp(clean, true);
+        if (split >= 0)
+        {
+            Long left = evalSize(clean.substring(0, split), project, contextModule, depth + 1);
+            Long right = evalSize(clean.substring(split + 1), project, contextModule, depth + 1);
+            if (left == null || right == null) return null;
+            try
+            {
+                return clean.charAt(split) == '+' ? Math.addExact(left, right) : Math.subtractExact(left, right);
+            }
+            catch (ArithmeticException e)
+            {
+                return null;
+            }
+        }
+        split = splitBinaryOp(clean, false);
+        if (split >= 0)
+        {
+            Long left = evalSize(clean.substring(0, split), project, contextModule, depth + 1);
+            Long right = evalSize(clean.substring(split + 1), project, contextModule, depth + 1);
+            if (left == null || right == null) return null;
+            try
+            {
+                return switch (clean.charAt(split))
+                {
+                    case '*' -> Math.multiplyExact(left, right);
+                    case '/' -> right == 0 ? null : left / right;
+                    case '%' -> right == 0 ? null : left % right;
+                    default -> null;
+                };
+            }
+            catch (ArithmeticException e)
+            {
+                return null;
+            }
+        }
+        if (clean.startsWith("-"))
+        {
+            Long inner = evalSize(clean.substring(1), project, contextModule, depth + 1);
+            return inner == null ? null : -inner;
+        }
+        Long literal = parseSizeLiteral(clean);
+        if (literal != null) return literal;
+        if (clean.endsWith(".sizeof"))
+        {
+            return primitiveSizeof(clean.substring(0, clean.length() - 7).strip());
+        }
+        if (clean.matches("[A-Za-z_][A-Za-z_0-9.:]*"))
+        {
+            return constValue(clean, project, contextModule, depth);
+        }
+        return null;
+    }
+
+    private static int matchingParen(@NotNull String text, int open)
+    {
+        int depth = 0;
+        for (int i = open; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (c == '(') depth++;
+            else if (c == ')')
+            {
+                depth--;
+                if (depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Rightmost binary operator of the given precedence group at paren depth
+     * zero, or -1. A `-` directly after another operator or `(` is unary and
+     * skipped; `*`/`/`/`%` are never unary here.
+     */
+    private static int splitBinaryOp(@NotNull String text, boolean additive)
+    {
+        int depth = 0;
+        for (int i = text.length() - 1; i >= 0; i--)
+        {
+            char c = text.charAt(i);
+            if (c == ')') depth++;
+            else if (c == '(') depth--;
+            else if (depth == 0 && (additive ? (c == '+' || c == '-') : (c == '*' || c == '/' || c == '%')))
+            {
+                if (c == '-' && (i == 0 || "+-*/%(".indexOf(text.charAt(i - 1)) >= 0)) continue;
+                if (i == 0 || i == text.length() - 1) continue;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static @Nullable Long parseSizeLiteral(@NotNull String text)
+    {
+        String clean = text.strip().replace("_", "");
+        try
+        {
+            if (clean.startsWith("0x") || clean.startsWith("0X")) return Long.parseLong(clean.substring(2), 16);
+            if (clean.startsWith("0b") || clean.startsWith("0B")) return Long.parseLong(clean.substring(2), 2);
+            if (clean.startsWith("0o") || clean.startsWith("0O")) return Long.parseLong(clean.substring(2), 8);
+            if (clean.matches("0[0-7]+")) return Long.parseLong(clean.substring(1), 8);
+            if (!clean.matches("[0-9]+")) return null;
+            return Long.parseLong(clean);
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Size of a primitive type in bytes ({@code uint.sizeof} is 4), or
+     * {@code null} when not statically known here (structs, aliases, ...).
+     */
+    private static @Nullable Long primitiveSizeof(@NotNull String typeName)
+    {
+        String shortName = shortName(normalize(typeName));
+        if (shortName.endsWith("*")) return 8L;
+        if (shortName.equals("char") || shortName.equals("ichar") || shortName.equals("bool")) return 1L;
+        int[] intBits = INT_TYPES.get(shortName);
+        if (intBits != null) return (long) (intBits[0] / 8);
+        Integer floatBits = FLOAT_TYPES.get(shortName);
+        if (floatBits != null) return (long) (floatBits / 8);
+        return null;
+    }
+
+    /**
+     * Integer value of a {@code const} by (possibly qualified) name,
+     * recursively evaluated. Same-module declarations win over other
+     * modules on name clashes.
+     */
+    private static @Nullable Long constValue(
+            @NotNull String name,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            int depth)
+    {
+        String wanted = shortName(normalize(name));
+        boolean qualified = normalize(name).contains("::");
+        C3ConstDeclarationStmt best = null;
+        try
+        {
+            for (String key : StubIndex.getInstance().getAllKeys(NameIndex.KEY, project))
+            {
+                if (qualified)
+                {
+                    if (!key.equals(normalize(name))) continue;
+                }
+                else if (!key.equals(wanted) && !key.endsWith("::" + wanted)) continue;
+                for (C3PsiElement element : safeElements(NameIndex.KEY, key, project))
+                {
+                    if (!(element instanceof C3ConstDeclarationStmt constDecl)) continue;
+                    if (best == null) best = constDecl;
+                    if (contextModule != null && contextModule.equals(ModuleName.from(constDecl))) best = constDecl;
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+        if (best == null) return null;
+        C3Expr init;
+        try
+        {
+            init = best.getExpr();
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        if (init == null) return null;
+        return evalSize(init.getText(), project, contextModule, depth + 1);
+    }
+
     public static @Nullable VectorInfo parseVector(@NotNull String typeText)
     {
         java.util.regex.Matcher matcher = VECTOR_PATTERN.matcher(normalize(typeText));
@@ -1864,6 +2287,14 @@ public final class TypeChecker
         if (vector == null && array == null) return null;
         String element = vector != null ? vector.element : array.element;
         long expected = vector != null ? vector.size : array.size;
+        String sizeText = vector != null ? vector.sizeText : array.sizeText;
+        if (expected < 0 && !sizeText.isEmpty() && !sizeText.equals("*"))
+        {
+            // Symbolic size (`uint[BUF_SIZE]`): verify the count when the
+            // expression evaluates, stay lenient otherwise.
+            Long evaluated = evalSize(sizeText, project, contextModule, 0);
+            if (evaluated != null) expected = evaluated;
+        }
 
         List<InferredType> elements = source.getElements();
         if (!source.hasNamedArguments() && vector != null && expected >= 0 && elements.size() != expected)
@@ -1934,92 +2365,494 @@ public final class TypeChecker
         return source;
     }
 
+    private enum IfBranch
+    {
+        THEN, ELSE, COND
+    }
+
     private static boolean isNarrowedUse(@NotNull C3Expr useSite, @NotNull String name)
     {
         int useOffset = useSite.getTextOffset();
+        PsiElement child = useSite;
         PsiElement parent = useSite.getParent();
         int depth = 0;
-        while (parent != null && depth < 10)
+        while (parent != null && depth < 14)
         {
-            if (parent instanceof org.c3lang.intellij.psi.C3CompoundStatement compound)
+            if (parent instanceof C3IfStmt ifStmt)
             {
-                if (compoundPrecedesWithGuard(compound, useOffset, name)) return true;
+                IfBranch branch = branchOf(ifStmt, child);
+                Boolean decided = narrowingAtIf(ifStmt, branch, useSite, name);
+                if (decided != null) return decided;
             }
+            else if (parent instanceof C3CompoundStatement compound)
+            {
+                Boolean guarded = compoundPrecedesWithGuard(compound, useSite, useOffset, name);
+                if (guarded != null) return guarded;
+            }
+            child = parent;
             parent = parent.getParent();
             depth++;
         }
         return false;
     }
 
-    private static boolean compoundPrecedesWithGuard(
-            @NotNull org.c3lang.intellij.psi.C3CompoundStatement compound,
+    /**
+     * Which part of the {@code if} holds the child on the path from the use:
+     * the then-branch, the else-branch, the condition itself, or none of
+     * them ({@code null}, e.g. the label) when the use sits outside.
+     */
+    private static @Nullable IfBranch branchOf(@NotNull C3IfStmt ifStmt, @NotNull PsiElement child)
+    {
+        if (child == ifStmt.getCompoundStatement() || child == ifStmt.getStatement()) return IfBranch.THEN;
+        C3ElsePart elsePart = ifStmt.getElsePart();
+        if (elsePart != null && (elsePart == child || PsiTreeUtil.isAncestor(elsePart, child, false)))
+        {
+            return IfBranch.ELSE;
+        }
+        if (ifStmt.getParenCond() != null && PsiTreeUtil.isAncestor(ifStmt.getParenCond(), child, false))
+        {
+            return IfBranch.COND;
+        }
+        return null;
+    }
+
+    /**
+     * Narrowing verdict at one {@code if}: {@code TRUE}/{@code FALSE} when
+     * the branch position decides it, {@code null} to keep looking outward.
+     */
+    private static @Nullable Boolean narrowingAtIf(
+            @NotNull C3IfStmt ifStmt,
+            @Nullable IfBranch branch,
+            @NotNull C3Expr useSite,
+            @NotNull String name)
+    {
+        C3ParenCond paren = ifStmt.getParenCond();
+        C3Cond cond = paren != null ? paren.getCond() : null;
+        if (cond == null) return null;
+        if (branch == null)
+        {
+            // The use follows the statement: only an exhaustive `catch`
+            // narrows (`try` never narrows what follows it).
+            return catchNarrowsAfter(ifStmt, cond, name) ? Boolean.TRUE : null;
+        }
+        if (branch == IfBranch.COND) return null;
+        Boolean catchVerdict = catchBranchNarrowing(cond, branch, name);
+        if (catchVerdict != null) return catchVerdict;
+        return tryBranchNarrowing(cond, branch, name);
+    }
+
+    private static @Nullable Boolean compoundPrecedesWithGuard(
+            @NotNull C3CompoundStatement compound,
+            @NotNull C3Expr useSite,
             int useOffset,
             @NotNull String name)
     {
-        for (org.c3lang.intellij.psi.C3StatementList statementList : compound.getStatementListList())
+        for (C3StatementList statementList : compound.getStatementListList())
         {
-            for (org.c3lang.intellij.psi.C3Statement stmt : statementList.getStatementList())
+            for (C3Statement stmt : statementList.getStatementList())
             {
                 if (stmt.getTextOffset() >= useOffset) break;
                 if (stmt.getIfStmt() == null) continue;
-                if (ifNarrows(stmt.getIfStmt(), name)) return true;
+                Boolean verdict = narrowingAtIf(stmt.getIfStmt(), null, useSite, name);
+                if (verdict != null) return verdict;
             }
         }
-        return false;
+        return null;
     }
 
-    private static boolean ifNarrows(@NotNull org.c3lang.intellij.psi.C3IfStmt ifStmt, @NotNull String name)
+    /**
+     * After-statement rule: `if (catch ... = x)` narrows later uses of
+     * {@code x} exactly when the fault branch always leaves its scope.
+     * The presence of an `else` does not matter (it only runs for values).
+     */
+    private static boolean catchNarrowsAfter(
+            @NotNull C3IfStmt ifStmt, @NotNull C3Cond cond, @NotNull String name)
     {
-        org.c3lang.intellij.psi.C3ParenCond paren = ifStmt.getParenCond();
-        if (paren == null || paren.getCond() == null) return false;
-        org.c3lang.intellij.psi.C3Cond cond = paren.getCond();
-        // `if (catch err = x) { fault branch }`: past the statement, the
-        // fault case is separated and `x` holds a plain result.
-        if (cond.getCatchUnwrap() != null && cond.getCatchUnwrap().getCatchUnwrapList() != null)
-        {
-            for (C3Expr caught : cond.getCatchUnwrap().getCatchUnwrapList().getExprList())
-            {
-                if (name.equals(caught.getText().strip())) return true;
-            }
-        }
-        for (org.c3lang.intellij.psi.C3CatchUnwrap unwrap
-            : com.intellij.psi.util.PsiTreeUtil.findChildrenOfType(cond, org.c3lang.intellij.psi.C3CatchUnwrap.class))
+        boolean tested = false;
+        for (C3CatchUnwrap unwrap : PsiTreeUtil.findChildrenOfType(cond, C3CatchUnwrap.class))
         {
             if (unwrap.getCatchUnwrapList() == null) continue;
             for (C3Expr caught : unwrap.getCatchUnwrapList().getExprList())
             {
-                if (name.equals(caught.getText().strip())) return true;
+                if (name.equals(caught.getText().strip())) tested = true;
             }
         }
-        // `if (!x) return/continue/break;`: past the statement, `x` is truthy.
-        String condText = cond.getText().replaceAll("\\s+", "");
-        if (condText.equals("(!" + name + ")") && branchDiverges(ifStmt))
+        if (!tested) return false;
+        return branchAlwaysDiverges(ifStmt);
+    }
+
+    private static @Nullable Boolean catchBranchNarrowing(
+            @NotNull C3Cond cond, @NotNull IfBranch branch, @NotNull String name)
+    {
+        boolean tested = false;
+        for (C3CatchUnwrap unwrap : PsiTreeUtil.findChildrenOfType(cond, C3CatchUnwrap.class))
         {
-            return true;
+            if (unwrap.getCatchUnwrapList() == null) continue;
+            for (C3Expr caught : unwrap.getCatchUnwrapList().getExprList())
+            {
+                if (name.equals(caught.getText().strip())) tested = true;
+            }
+        }
+        if (!tested) return null;
+        // Inside the fault branch the value is faulty; inside `else` (or
+        // past an exhaustive body) only values arrive.
+        return branch == IfBranch.ELSE;
+    }
+
+    /**
+     * Inside `if (try t = x)`, only the bound copy narrows; the tested
+     * expression itself stays Optional. Without a binding
+     * (`if (try x)`), the tested name narrows instead.
+     */
+    private static @Nullable Boolean tryBranchNarrowing(
+            @NotNull C3Cond cond, @NotNull IfBranch branch, @NotNull String name)
+    {
+        boolean decided = false;
+        boolean narrowed = false;
+        for (C3TryUnwrapChain chain : PsiTreeUtil.findChildrenOfType(cond, C3TryUnwrapChain.class))
+        {
+            for (C3TryUnwrap unwrap : chain.getTryUnwrapList())
+            {
+                String binding = unwrapBindingName(unwrap);
+                String tested = unwrap.getExpr() != null ? unwrap.getExpr().getText().strip() : "";
+                if (binding != null && name.equals(binding))
+                {
+                    if (branch != IfBranch.THEN) return null;
+                    decided = true;
+                    narrowed = true;
+                }
+                else if (binding == null && name.equals(tested))
+                {
+                    if (branch != IfBranch.THEN) return null;
+                    decided = true;
+                    narrowed = true;
+                }
+                else if (binding != null && name.equals(tested))
+                {
+                    // Tested alongside a binding: still Optional inside.
+                    return Boolean.FALSE;
+                }
+            }
+        }
+        return decided ? narrowed : null;
+    }
+
+    /**
+     * Binding identifier of a `catch`/`try` unwrap (`err` in
+     * `catch err = x`, `t` in `try t = x`), or {@code null} for the
+     * binding-less forms. Delegates to the unwrap mixins; the inline scan
+     * stays as a fallback for detached trees.
+     */
+    static @Nullable String unwrapBindingName(@NotNull C3PsiElement unwrap)
+    {
+        if (unwrap instanceof C3CatchUnwrapMixin catchMixin && catchMixin.getBindingName() != null)
+        {
+            return catchMixin.getBindingName();
+        }
+        if (unwrap instanceof C3TryUnwrapMixin tryMixin && tryMixin.getBindingName() != null)
+        {
+            return tryMixin.getBindingName();
+        }
+        ASTNode eq = null;
+        for (ASTNode child : unwrap.getNode().getChildren(null))
+        {
+            if (child.getElementType() == C3Types.EQ)
+            {
+                eq = child;
+                break;
+            }
+        }
+        if (eq == null) return null;
+        ASTNode current = eq.getTreePrev();
+        while (current != null
+            && (current.getPsi() instanceof PsiWhiteSpace || current.getPsi() instanceof PsiComment))
+        {
+            current = current.getTreePrev();
+        }
+        if (current != null && current.getElementType() == C3Types.IDENT) return current.getText();
+        return null;
+    }
+
+    /**
+     * Whether the `if` statement's then-branch always leaves its scope, so
+     * code after the statement only runs for the complementary case.
+     */
+    private static boolean branchAlwaysDiverges(@NotNull C3IfStmt ifStmt)
+    {
+        if (ifStmt.getCompoundStatement() != null)
+        {
+            return blockAlwaysDiverges(
+                ifStmt.getCompoundStatement(), collectInnerLabels(ifStmt.getCompoundStatement()));
+        }
+        if (ifStmt.getStatement() != null)
+        {
+            PsiElement parent = ifStmt.getStatement().getParent();
+            Set<String> labels = parent != null ? collectInnerLabels(parent) : Set.of();
+            return statementAlwaysDiverges(ifStmt.getStatement(), labels, 0, 0);
         }
         return false;
     }
 
-    private static boolean branchDiverges(@NotNull org.c3lang.intellij.psi.C3IfStmt ifStmt)
+    static boolean blockAlwaysDiverges(@Nullable C3CompoundStatement body, @NotNull Set<String> labels)
     {
-        if (ifStmt.getCompoundStatement() != null)
-        {
-            return bodyDiverges(ifStmt.getCompoundStatement().getText());
-        }
-        org.c3lang.intellij.psi.C3Statement single = ifStmt.getStatement();
-        if (single == null) return false;
-        String text = single.getText().strip();
-        return text.startsWith("return") || text.startsWith("continue")
-            || text.startsWith("break") || text.startsWith("goto")
-            || text.startsWith("assert");
+        return blockAlwaysDiverges(body, labels, 0, 0);
     }
 
-    private static boolean bodyDiverges(@NotNull String bodyText)
+    private static boolean blockAlwaysDiverges(
+            @Nullable C3CompoundStatement body,
+            @NotNull Set<String> labels,
+            int loopDepth,
+            int switchDepth)
     {
-        String compact = bodyText.replaceAll("\\s+", " ");
-        return compact.contains(" return ") || compact.contains(" continue ")
-            || compact.contains(" break ") || compact.contains(" goto ")
-            || compact.contains(" assert ");
+        if (body == null) return false;
+        for (C3StatementList statementList : body.getStatementListList())
+        {
+            if (statementListAlwaysDiverges(statementList, labels, loopDepth, switchDepth)) return true;
+        }
+        return false;
+    }
+
+    private static boolean statementListAlwaysDiverges(
+            @Nullable C3StatementList list, @NotNull Set<String> labels, int loopDepth, int switchDepth)
+    {
+        if (list == null) return false;
+        for (C3Statement statement : list.getStatementList())
+        {
+            if (statementAlwaysDiverges(statement, labels, loopDepth, switchDepth)) return true;
+        }
+        return false;
+    }
+
+    private static boolean statementAlwaysDiverges(
+            @NotNull C3Statement statement,
+            @NotNull Set<String> labels,
+            int loopDepth,
+            int switchDepth)
+    {
+        if (statement.getReturnStmt() != null) return true;
+        if (statement.getBreakStmt() != null)
+        {
+            return jumpDiverges(statement.getBreakStmt(), labels, loopDepth, switchDepth, false);
+        }
+        if (statement.getContinueStmt() != null)
+        {
+            return jumpDiverges(statement.getContinueStmt(), labels, loopDepth, 0, true);
+        }
+        if (statement.getIfStmt() != null) return ifAlwaysDiverges(statement.getIfStmt(), labels, loopDepth, switchDepth);
+        if (statement.getSwitchStmt() != null)
+        {
+            return switchAlwaysDiverges(statement.getSwitchStmt(), labels, loopDepth, switchDepth);
+        }
+        if (statement.getCompoundStatement() != null)
+        {
+            return blockAlwaysDiverges(statement.getCompoundStatement(), labels, loopDepth, switchDepth);
+        }
+        if (statement.getDoStmt() != null && statement.getDoStmt().getCompoundStatement() != null)
+        {
+            // `do` runs its body at least once, but `break`/`continue` inside
+            // target the loop itself.
+            return blockAlwaysDiverges(statement.getDoStmt().getCompoundStatement(), labels, loopDepth + 1, switchDepth);
+        }
+        if (statement.getCtIfStmt() != null) return ctIfAlwaysDiverges(statement.getCtIfStmt(), labels, loopDepth, switchDepth);
+        if (statement.getExprStmt() != null && statement.getExprStmt().getExpr() != null)
+        {
+            return isNoreturnCall(statement.getExprStmt().getExpr());
+        }
+        return false;
+    }
+
+    /**
+     * A `break`/`continue` leaves the analyzed scope unless it targets a
+     * loop, switch or label inside it. Bare `continue` never targets a
+     * switch, so only the loop depth matters for it.
+     */
+    private static boolean jumpDiverges(
+            @NotNull PsiElement jump,
+            @NotNull Set<String> labels,
+            int loopDepth,
+            int switchDepth,
+            boolean isContinue)
+    {
+        String label = jumpLabel(jump);
+        if (label == null)
+        {
+            return isContinue ? loopDepth == 0 : (loopDepth == 0 && switchDepth == 0);
+        }
+        return !labels.contains(label);
+    }
+
+    private static @Nullable String jumpLabel(@NotNull PsiElement jump)
+    {
+        String text = jump.getText();
+        if (text == null) return null;
+        String compact = text.replaceAll("\\s+", " ").strip();
+        int space = compact.indexOf(' ');
+        if (space < 0) return null;
+        String label = compact.substring(space + 1).strip();
+        if (label.endsWith(";")) label = label.substring(0, label.length() - 1).strip();
+        return label.isEmpty() ? null : label;
+    }
+
+    private static boolean ifAlwaysDiverges(
+            @NotNull C3IfStmt ifStmt, @NotNull Set<String> labels, int loopDepth, int switchDepth)
+    {
+        boolean thenDiverges;
+        if (ifStmt.getCompoundStatement() != null)
+        {
+            thenDiverges = blockAlwaysDiverges(ifStmt.getCompoundStatement(), labels, loopDepth, switchDepth);
+        }
+        else if (ifStmt.getStatement() != null)
+        {
+            thenDiverges = statementAlwaysDiverges(ifStmt.getStatement(), labels, loopDepth, switchDepth);
+        }
+        else
+        {
+            return false;
+        }
+        if (!thenDiverges) return false;
+        C3ElsePart elsePart = ifStmt.getElsePart();
+        if (elsePart == null) return false;
+        if (elsePart.getCompoundStatement() != null)
+        {
+            return blockAlwaysDiverges(elsePart.getCompoundStatement(), labels, loopDepth, switchDepth);
+        }
+        if (elsePart.getIfStmt() != null) return ifAlwaysDiverges(elsePart.getIfStmt(), labels, loopDepth, switchDepth);
+        return false;
+    }
+
+    private static boolean switchAlwaysDiverges(
+            @NotNull C3SwitchStmt switchStmt,
+            @NotNull Set<String> labels,
+            int loopDepth,
+            int switchDepth)
+    {
+        C3SwitchBody body = switchStmt.getSwitchBody();
+        if (body == null || body.getNode() == null) return false;
+        List<PsiElement> branches = new ArrayList<>();
+        for (ASTNode child : body.getNode().getChildren(null))
+        {
+            PsiElement psi = child.getPsi();
+            if (psi instanceof C3CaseStmt || psi instanceof C3DefaultStmt) branches.add(psi);
+        }
+        if (branches.isEmpty()) return false;
+        boolean sawDefault = false;
+        Boolean[] diverging = new Boolean[branches.size()];
+        for (int i = branches.size() - 1; i >= 0; i--)
+        {
+            PsiElement branch = branches.get(i);
+            if (branch instanceof C3DefaultStmt) sawDefault = true;
+            C3StatementList list = branch instanceof C3CaseStmt caseStmt
+                ? caseStmt.getStatementList()
+                : ((C3DefaultStmt) branch).getStatementList();
+            if (list != null && statementListAlwaysDiverges(list, labels, loopDepth, switchDepth + 1))
+            {
+                diverging[i] = Boolean.TRUE;
+            }
+            else if (list == null || list.getStatementList().isEmpty() || endsWithNextcase(list))
+            {
+                // Empty (or explicitly forwarded) cases fall into the next one.
+                diverging[i] = (i + 1 < diverging.length) ? diverging[i + 1] : Boolean.FALSE;
+            }
+            else
+            {
+                diverging[i] = Boolean.FALSE;
+            }
+        }
+        if (!sawDefault) return false;
+        for (Boolean branch : diverging)
+        {
+            if (!Boolean.TRUE.equals(branch)) return false;
+        }
+        return true;
+    }
+
+    private static boolean endsWithNextcase(@NotNull C3StatementList list)
+    {
+        List<C3Statement> statements = list.getStatementList();
+        if (statements.isEmpty()) return false;
+        try
+        {
+            return statements.get(statements.size() - 1).getNextcaseStmt() != null;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private static boolean ctIfAlwaysDiverges(
+            @NotNull C3CtIfStmt ctIf, @NotNull Set<String> labels, int loopDepth, int switchDepth)
+    {
+        List<C3StatementList> lists;
+        try
+        {
+            lists = ctIf.getStatementListList();
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+        // Compile-time conditions cannot be evaluated here: both present
+        // branches must diverge.
+        if (lists.size() < 2) return false;
+        for (C3StatementList list : lists)
+        {
+            if (!statementListAlwaysDiverges(list, labels, loopDepth, switchDepth)) return false;
+        }
+        return true;
+    }
+
+    private static @NotNull Set<String> collectInnerLabels(@NotNull PsiElement root)
+    {
+        Set<String> labels = new HashSet<>();
+        try
+        {
+            for (C3Label label : PsiTreeUtil.findChildrenOfType(root, C3Label.class))
+            {
+                String text = label.getText();
+                if (text == null) continue;
+                String name = text.contains(":") ? text.substring(0, text.indexOf(':')).strip() : text.strip();
+                if (!name.isEmpty()) labels.add(name);
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return labels;
+    }
+
+    /**
+     * Whether the expression is a call to a `@noreturn` function or macro
+     * (which includes the builtin `unreachable()` when it resolves to one).
+     */
+    private static boolean isNoreturnCall(@Nullable C3Expr expr)
+    {
+        if (!(expr instanceof C3CallExpr call)) return false;
+        C3CallablePsiElement callable;
+        try
+        {
+            callable = CallChecker.resolveTarget(call);
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+        if (callable == null) return false;
+        try
+        {
+            if (callable instanceof C3FuncDef funcDef)
+            {
+                return AttributeSpecs.hasAttribute(funcDef.getAttributes(), "noreturn");
+            }
+            if (callable instanceof C3MacroDefinition macro)
+            {
+                return AttributeSpecs.hasAttribute(macro.getAttributes(), "noreturn");
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
     }
 
     /**
@@ -2791,8 +3624,245 @@ public final class TypeChecker
     }
 
     /**
-     * Raw declared type text for locals, parameters and explicit const types.
+     * Expected type of an untyped lambda parameter from the surrounding
+     * function-pointer type, e.g. {@code int} for {@code i} in
+     * {@code apply(x, fn (i) => i * i)} with
+     * {@code fn void apply(int[] arr, IntTransform t)} where
+     * {@code alias IntTransform = fn int(int)}. Pure PSI walk plus alias
+     * resolution; anything unrecognized yields {@code null} (unchecked).
      */
+    public static @Nullable String lambdaParamType(@NotNull C3Parameter param)
+    {
+        if (param.getType() != null) return null;
+        C3LambdaDecl lambdaDecl = PsiTreeUtil.getParentOfType(param, C3LambdaDecl.class);
+        if (lambdaDecl == null) return null;
+        C3ParameterList lambdaParams = lambdaDecl.getFnParameterList() != null
+            ? lambdaDecl.getFnParameterList().getParameterList()
+            : null;
+        if (lambdaParams == null) return null;
+        int paramIndex = -1;
+        List<C3ParamDecl> lambdaDecls = lambdaParams.getParamDeclList();
+        for (int i = 0; i < lambdaDecls.size(); i++)
+        {
+            if (lambdaDecls.get(i).getParameter() == param)
+            {
+                paramIndex = i;
+                break;
+            }
+        }
+        if (paramIndex < 0) return null;
+        PsiElement lambdaExpr = lambdaDecl.getParent();
+        if (lambdaExpr == null) return null;
+        PsiElement context = lambdaExpr.getParent();
+        String expectedFn = null;
+        if (context instanceof C3Arg arg)
+        {
+            expectedFn = callArgFnType(arg, paramIndex);
+        }
+        else if (context instanceof C3LocalDeclAfterType declarator)
+        {
+            C3LocalDeclarationStmt stmt = PsiTreeUtil.getParentOfType(declarator, C3LocalDeclarationStmt.class);
+            if (stmt != null && stmt.getOptionalType() != null && stmt.getOptionalType().getType() != null)
+            {
+                expectedFn = stmt.getOptionalType().getType().getText();
+            }
+        }
+        else if (context instanceof C3ConstDeclarationStmt constDecl && constDecl.getType() != null)
+        {
+            expectedFn = constDecl.getType().getText();
+        }
+        if (expectedFn == null) return null;
+        String fnText = underlyingFnType(expectedFn, param);
+        if (fnText == null) return null;
+        FnType fnType = parseFnType(fnText);
+        if (fnType == null || paramIndex >= fnType.params.size()) return null;
+        String typeText = fnType.params.get(paramIndex);
+        return typeText.isBlank() ? null : typeText.strip();
+    }
+
+    record FnType(@NotNull String returns, @NotNull List<String> params)
+    {
+    }
+
+    /**
+     * Declared type text of the call parameter receiving the lambda's
+     * argument (positional by order, named by name), or {@code null}.
+     */
+    private static @Nullable String callArgFnType(@NotNull C3Arg arg, int lambdaParamIndex)
+    {
+        C3CallExpr call = PsiTreeUtil.getParentOfType(arg, C3CallExpr.class);
+        if (call == null) return null;
+        C3CallablePsiElement callee;
+        try
+        {
+            callee = CallChecker.resolveTarget(call);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        if (callee == null)
+        {
+            return null;
+        }
+        CallChecker.Signature signature;
+        try
+        {
+            signature = CallChecker.buildSignature(callee);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        List<CallChecker.ParamInfo> params = signature.params;
+        String ownerText = callee instanceof C3FuncDef funcDef
+            ? InterfaceService.methodOwnerTypeName(funcDef)
+            : (callee instanceof C3MacroDefinition macro
+                ? InterfaceService.methodOwnerTypeName(macro)
+                : null);
+        int startIndex = 0;
+        if (ownerText != null && !params.isEmpty())
+        {
+            C3Expr receiver = call.getExpr() instanceof C3CallExpr inner ? inner.getExpr() : call.getExpr();
+            boolean staticReceiver = receiver instanceof C3TypeExpr;
+            if (!staticReceiver && InterfaceService.firstParameterMatchesOwner(
+                signature.paramTypes, signature.parameterList, ownerText))
+            {
+                startIndex = 1;
+            }
+        }
+        String named = arg.getNamedIdent() != null ? arg.getNamedIdent().getText() : null;
+        if (named != null)
+        {
+            for (int i = startIndex; i < params.size(); i++)
+            {
+                if (named.equals(params.get(i).name)) return params.get(i).typeText;
+            }
+            return null;
+        }
+        List<C3Arg> siblings = callArgList(call);
+        int positional = 0;
+        for (C3Arg sibling : siblings)
+        {
+            if (sibling == arg) break;
+            if (sibling.getNamedIdent() == null) positional++;
+        }
+        boolean ownNamed = false;
+        for (C3Arg sibling : siblings)
+        {
+            if (sibling != arg && sibling.getNamedIdent() != null) ownNamed = true;
+        }
+        // Positional-after-named is rejected by the compiler; bail out.
+        if (ownNamed) return null;
+        int slot = startIndex + positional;
+        if (slot >= params.size())
+        {
+            for (int i = params.size() - 1; i >= startIndex; i--)
+            {
+                if (params.get(i).vaarg) return params.get(i).vaargElement;
+            }
+            return null;
+        }
+        return params.get(slot).typeText;
+    }
+
+    private static @NotNull List<C3Arg> callArgList(@NotNull C3CallExpr call)
+    {
+        try
+        {
+            C3CallExprTail tail = call.getCallExprTail();
+            C3CallInvocation invocation = tail != null ? tail.getCallInvocation() : null;
+            C3CallArgList callArgs = invocation != null ? invocation.getCallArgList() : null;
+            C3ArgList args = callArgs != null ? callArgs.getArgList() : null;
+            if (args != null) return args.getArgList();
+        }
+        catch (Exception ignored)
+        {
+        }
+        return List.of();
+    }
+
+    private static @Nullable String underlyingFnType(@NotNull String expectedFn, @NotNull C3Parameter param)
+    {
+        return underlyingFnType(expectedFn, param.getProject(), ModuleName.from(param));
+    }
+
+    static @Nullable String underlyingFnTypeForCheck(
+            @NotNull String expectedFn, @NotNull C3PsiElement context)
+    {
+        return underlyingFnType(expectedFn, context.getProject(), ModuleName.from(context));
+    }
+
+    private static @Nullable String underlyingFnType(
+            @NotNull String expectedFn, @NotNull Project project, @Nullable ModuleName contextModule)
+    {
+        if (parseFnType(expectedFn) != null) return expectedFn;
+        try
+        {
+            String resolved = resolveAlias(expectedFn, project, contextModule, 0);
+            if (resolved != null && parseFnType(resolved) != null) return resolved;
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    /**
+     * Parses a function-pointer type (`fn int(int)`, `fn void()`) into its
+     * return and parameter type texts. Anything else yields {@code null}.
+     * Note: {@link #normalize} must not run before the prefix check, it
+     * strips the space in `fn `.
+     */
+    static @Nullable FnType parseFnType(@NotNull String text)
+    {
+        String clean = text.strip();
+        if (!clean.startsWith("fn ")) return null;
+        String rest = clean.substring(3).strip();
+        int open = rest.indexOf('(');
+        int close = rest.lastIndexOf(')');
+        if (open <= 0 || close <= open) return null;
+        String returns = normalize(rest.substring(0, open).strip());
+        if (returns.isEmpty()) return null;
+        List<String> params = splitTopLevel(rest.substring(open + 1, close), ',');
+        List<String> types = new ArrayList<>();
+        for (String entry : params)
+        {
+            String item = entry.strip();
+            if (item.isEmpty()) continue;
+            // `type name` form degrades to the leading type.
+            int space = item.indexOf(' ');
+            if (space > 0 && item.substring(0, space).matches("[A-Za-z_][A-Za-z_0-9.:*\\[\\]]*")) item = item.substring(0, space);
+            types.add(normalize(item));
+        }
+        return new FnType(returns, types);
+    }
+
+    private static @NotNull List<String> splitTopLevel(@NotNull String text, char separator)
+    {
+        List<String> parts = new ArrayList<>();
+        int depthRound = 0;
+        int depthSquare = 0;
+        int depthAngle = 0;
+        int start = 0;
+        for (int i = 0; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (c == '(') depthRound++;
+            else if (c == ')') depthRound--;
+            else if (c == '[') depthSquare++;
+            else if (c == ']') depthSquare--;
+            else if (c == '<') depthAngle++;
+            else if (c == '>') depthAngle--;
+            else if (c == separator && depthRound == 0 && depthSquare == 0 && depthAngle == 0)
+            {
+                parts.add(text.substring(start, i));
+                start = i + 1;
+            }
+        }
+        parts.add(text.substring(start));
+        return parts;
+    }
     public static @Nullable String declaredTypeText(@NotNull PsiElement resolved)
     {
         if (resolved instanceof C3LocalDeclAfterType)
@@ -2804,7 +3874,15 @@ public final class TypeChecker
         }
         if (resolved instanceof C3Parameter parameter)
         {
-            return parameter.getType() != null ? parameter.getType().getText() : null;
+            if (parameter.getType() != null) return parameter.getType().getText();
+            try
+            {
+                return lambdaParamType(parameter);
+            }
+            catch (Exception ignored)
+            {
+                return null;
+            }
         }
         if (resolved instanceof C3ParamDecl paramDecl)
         {
@@ -2888,20 +3966,21 @@ public final class TypeChecker
             return null;
         }
         C3Expr callee = call.getExpr();
-        if (callee instanceof C3PathIdentExpr pathIdentExpr)
+        if (callee instanceof C3PathIdentExpr)
         {
-            C3PathIdent pathIdent = pathIdentExpr.getPathIdent();
-            PsiElement resolved;
+            // Full overload selection (same-module shadowing, arity, types),
+            // so inference agrees with checking on which declaration is called.
+            C3CallablePsiElement target;
             try
             {
-                resolved = pathIdent.getReference().resolve();
+                target = CallChecker.resolveTarget(call);
             }
             catch (Exception e)
             {
                 return null;
             }
-            if (resolved instanceof C3FuncDef funcDef) return cascadeOptional(call, returnTypeOf(funcDef), depth);
-            if (resolved instanceof C3MacroDefinition macro) return cascadeOptional(call, returnTypeOf(macro), depth);
+            if (target instanceof C3FuncDef funcDef) return cascadeOptional(call, returnTypeOf(funcDef), depth);
+            if (target instanceof C3MacroDefinition macro) return cascadeOptional(call, returnTypeOf(macro), depth);
             return null;
         }
         if (callee instanceof C3PathAtIdentExpr pathAtIdentExpr)
@@ -2952,6 +4031,16 @@ public final class TypeChecker
             @NotNull C3Expr receiver, @Nullable String member, int depth)
     {
         if (member == null || depth >= MAX_DEPTH) return null;
+        // `.sizeof`/`.alignof` on a type name (`Header.sizeof`) are
+        // compile-time constants: with a computable layout they infer as
+        // literals, so narrowing follows values exactly like c3c
+        // (`uint pos = Header.sizeof` is fine for small structs). This runs
+        // before receiver inference, which yields nothing for type receivers.
+        if (member.equals("sizeof") || member.equals("alignof"))
+        {
+            InferredType constant = typePropertyConstant(receiver, member);
+            if (constant != null) return constant;
+        }
         InferredType receiverType = infer(receiver, depth + 1);
         if (receiverType == null) return null;
         String clean = stripOptional(normalize(receiverType.getName()));
@@ -2981,6 +4070,381 @@ public final class TypeChecker
         ShortType returnType = callable.getReturnType();
         if (returnType == null || returnType.getValue() == null) return null;
         return kindOf(returnType.getValue());
+    }
+
+    /**
+     * Compile-time value of {@code .sizeof}/`.alignof`} on a type-name
+     * receiver, or {@code null} when the receiver is a value (runtime
+     * {@code typeid}, ordinary variables) or the layout is not computable.
+     * Unknown layouts fall back to the plain {@code usz} type upstream.
+     */
+    private static @Nullable InferredType typePropertyConstant(
+            @NotNull C3Expr receiver,
+            @NotNull String member)
+    {
+        String typeText = typeNameOf(receiver);
+        if (typeText == null) return null;
+        Layout layout;
+        try
+        {
+            layout = layoutOf(typeText, receiver.getProject(), ModuleName.from(receiver), 0, new HashSet<>());
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        if (layout == null) return null;
+        long value = member.equals("sizeof") ? layout.size() : layout.align();
+        return InferredType.intLiteral(BigInteger.valueOf(value), "usz");
+    }
+
+    /**
+     * The named type when the receiver expression denotes a type rather than
+     * a value: a path resolving to a type declaration, or a primitive
+     * keyword. Anything else (variables, calls, runtime {@code typeid}
+     * values) is not a type context.
+     */
+    private static @Nullable String typeNameOf(@NotNull C3Expr receiver)
+    {
+        // `Header.sizeof` parses the receiver as a type expression: it is a
+        // type by construction.
+        if (receiver instanceof C3TypeExpr typeExpr)
+        {
+            String text = typeExpr.getText();
+            if (text != null && !text.isBlank()) return text.strip();
+            return null;
+        }
+        if (!(receiver instanceof C3PathIdentExpr pathExpr) || pathExpr.getPathIdent().getPath() != null) return null;
+        String text = pathExpr.getPathIdent().getText();
+        if (text == null || text.isBlank()) return null;
+        String clean = text.strip();
+        if (!clean.matches("[A-Za-z_][A-Za-z_0-9.:]*")) return null;
+        // A resolved value (local, parameter, function, ...) is not a type.
+        try
+        {
+            PsiElement resolved = pathExpr.getPathIdent().getReference().resolve();
+            if (resolved instanceof C3TypeName) return clean;
+            if (resolved != null) return null;
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+        // Unresolved primitives (`int`, `uint`, ...) never declare anything.
+        String shortName = shortName(clean);
+        if (INT_TYPES.containsKey(shortName) || FLOAT_TYPES.containsKey(shortName)
+            || shortName.equals("char") || shortName.equals("ichar") || shortName.equals("bool")
+            || shortName.equals("any") || shortName.equals("typeid") || shortName.equals("fault")
+            || shortName.equals("String") || shortName.equals("ZString") || shortName.equals("void")) return clean;
+        // Otherwise the name must declare a type somewhere.
+        try
+        {
+            if (!org.c3lang.intellij.index.InterfaceService.INSTANCE
+                .findTypeDeclarations(FullyQualifiedName.parse(clean), receiver.getProject()).isEmpty()) return clean;
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    private record Layout(long size, long align)
+    {
+    }
+
+    /**
+     * Compile-time layout of a type with C layout rules (verified
+     * against {@code c3c}: sequential members at aligned offsets padded to
+     * the max alignment, unions take the max member, {@code @packed} drops
+     * padding). Anything not statically modellable here (bitstructs, exotic
+     * attributes, unresolvable names) yields {@code null}. Depth-bounded
+     * with cycle protection.
+     */
+    private static @Nullable Layout layoutOf(
+            @NotNull String typeText,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            int depth,
+            @NotNull Set<String> visiting)
+    {
+        if (depth > 8 || DumbService.isDumb(project)) return null;
+        String clean = normalize(typeText).strip();
+        if (clean.isEmpty()) return null;
+        if (clean.endsWith("*")) return new Layout(8, 8);
+        if (clean.endsWith("[]")) return new Layout(16, 8);
+        String shortName = shortName(clean);
+        if (shortName.equals("any") || shortName.equals("String")) return new Layout(16, 8);
+        if (shortName.equals("typeid") || shortName.equals("fault") || shortName.equals("ZString"))
+        {
+            return new Layout(8, 8);
+        }
+        if (shortName.equals("char") || shortName.equals("ichar") || shortName.equals("bool"))
+        {
+            return new Layout(1, 1);
+        }
+        int[] intBits = INT_TYPES.get(shortName);
+        if (intBits != null) return new Layout(intBits[0] / 8, intBits[0] / 8);
+        Integer floatBits = FLOAT_TYPES.get(shortName);
+        if (floatBits != null) return new Layout(floatBits / 8, floatBits / 8);
+        VectorInfo array = parseArray(clean);
+        if (array != null && !array.element.isEmpty())
+        {
+            Long count = array.size >= 0 ? array.size
+                : " *".equals(array.sizeText) || array.sizeText.isEmpty() ? null
+                : evalSize(array.sizeText, project, contextModule, 0);
+            Layout element = layoutOf(array.element, project, contextModule, depth + 1, visiting);
+            if (count == null || count < 0 || element == null) return null;
+            return new Layout(count * element.size(), element.align());
+        }
+        VectorInfo vector = parseVector(clean);
+        if (vector != null && !vector.element.isEmpty())
+        {
+            Long count = vector.size >= 0 ? vector.size : evalSize(vector.sizeText, project, contextModule, 0);
+            Layout element = layoutOf(vector.element, project, contextModule, depth + 1, visiting);
+            if (count == null || count < 0 || element == null) return null;
+            return new Layout(count * element.size(), element.align());
+        }
+        // Aliases, typedefs and distinct types: walk the underlying spelling.
+        String underlying = resolveCastType(clean, project, contextModule);
+        if (underlying != null && !namesEqual(underlying, clean))
+        {
+            return layoutOf(underlying, project, contextModule, depth + 1, visiting);
+        }
+        // Constdefs and enums occupy their backing type.
+        String backing = constdefOrEnumBacking(clean, project, contextModule);
+        if (backing != null) return layoutOf(backing, project, contextModule, depth + 1, visiting);
+        return structLayout(clean, project, contextModule, depth, visiting);
+    }
+
+    private static @Nullable Layout structLayout(
+            @NotNull String typeText,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            int depth,
+            @NotNull Set<String> visiting)
+    {
+        FullyQualifiedName name = FullyQualifiedName.parse(typeText);
+        List<C3StructDeclaration> declarations;
+        try
+        {
+            declarations =
+                org.c3lang.intellij.index.InterfaceService.INSTANCE.findStructDeclarations(name, project);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        C3StructDeclaration declaration = preferModule(declarations, contextModule);
+        if (declaration == null || declaration.getStructBody() == null) return null;
+        if (hasAnyAttribute(declaration, "compact", "overlap", "structlike")) return null;
+        String key = declaration.getTypeName().getText().strip() + "@"
+            + (ModuleName.from(declaration) != null ? ModuleName.from(declaration).getValue() : "");
+        if (!visiting.add(key)) return null;
+        try
+        {
+            return membersLayout(declaration.getStructBody(), isUnion(declaration), project, contextModule, depth, visiting);
+        }
+        finally
+        {
+            visiting.remove(key);
+        }
+    }
+
+    private static @Nullable Layout membersLayout(
+            @NotNull C3StructBody body,
+            boolean union,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            int depth,
+            @NotNull Set<String> visiting)
+    {
+        boolean packed = false;
+        try
+        {
+            PsiElement owner = body.getParent();
+            if (owner instanceof C3StructDeclaration structDecl && structDecl.getAttributes() != null)
+            {
+                packed = AttributeSpecs.hasAttribute(structDecl.getAttributes(), "packed");
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        long offset = 0;
+        long maxAlign = 1;
+        long maxSize = 0;
+        for (C3StructMemberDeclaration member : body.getStructMemberDeclarationList())
+        {
+            Layout memberLayout;
+            try
+            {
+                if (member.getStructBody() != null)
+                {
+                    // Anonymous nested struct/union: expanded inline.
+                    memberLayout = membersLayout(member.getStructBody(), isUnion(member),
+                        project, contextModule, depth + 1, visiting);
+                }
+                else if (member.getBitstructBody() != null)
+                {
+                    return null;
+                }
+                else
+                {
+                    FullyQualifiedName memberType = member.getStructPathType();
+                    if (memberType == null) return null;
+                    memberLayout = layoutOf(memberType.getFullName(), project, contextModule, depth + 1, visiting);
+                }
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+            if (memberLayout == null) return null;
+            if (union)
+            {
+                maxSize = Math.max(maxSize, memberLayout.size());
+                maxAlign = Math.max(maxAlign, packed ? 1 : memberLayout.align());
+            }
+            else
+            {
+                long align = packed ? 1 : memberLayout.align();
+                offset = alignUp(offset, align);
+                offset += memberLayout.size();
+                maxAlign = Math.max(maxAlign, align);
+            }
+        }
+        if (union) return new Layout(maxSize, maxAlign);
+        return new Layout(alignUp(offset, packed ? 1 : maxAlign), packed ? 1 : maxAlign);
+    }
+
+    private static long alignUp(long offset, long align)
+    {
+        if (align <= 1) return offset;
+        return (offset + align - 1) / align * align;
+    }
+
+    private static boolean isUnion(@NotNull PsiElement element)
+    {
+        try
+        {
+            return element.getNode() != null && element.getNode().findChildByType(C3Types.KW_UNION) != null;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private static boolean hasAnyAttribute(@NotNull C3StructDeclaration declaration, @NotNull String... names)
+    {
+        try
+        {
+            if (declaration.getAttributes() == null) return false;
+            for (String name : names)
+            {
+                if (AttributeSpecs.hasAttribute(declaration.getAttributes(), name)) return true;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
+    }
+
+    private static @Nullable C3StructDeclaration preferModule(
+            @NotNull List<C3StructDeclaration> declarations,
+            @Nullable ModuleName contextModule)
+    {
+        if (declarations.isEmpty()) return null;
+        if (contextModule != null)
+        {
+            for (C3StructDeclaration declaration : declarations)
+            {
+                if (contextModule.equals(ModuleName.from(declaration))) return declaration;
+            }
+        }
+        return declarations.get(0);
+    }
+
+    private static @Nullable String constdefOrEnumBacking(
+            @NotNull String typeText,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule)
+    {
+        String clean = normalize(typeText).strip();
+        if (!clean.matches("[A-Za-z_][A-Za-z_0-9.:]*")) return null;
+        String wanted = shortName(clean);
+        boolean qualified = clean.contains("::");
+        C3ConstdefDeclaration constdefMatch = null;
+        C3EnumDeclaration enumMatch = null;
+        try
+        {
+            for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
+            {
+                if (qualified)
+                {
+                    if (!key.equals(clean)) continue;
+                }
+                else if (!key.equals(wanted) && !key.endsWith("::" + wanted)) continue;
+                for (C3PsiElement element : safeElements(TypeIndex.KEY, key, project))
+                {
+                    if (!(element instanceof C3TypeName typeName)) continue;
+                    if (!typeName.getText().strip().equals(wanted)) continue;
+                    if (typeName.getParent() instanceof C3ConstdefDeclaration constdef)
+                    {
+                        if (constdefMatch == null) constdefMatch = constdef;
+                        if (contextModule != null && contextModule.equals(ModuleName.from(constdef)))
+                        {
+                            constdefMatch = constdef;
+                        }
+                    }
+                    else if (typeName.getParent() instanceof C3EnumDeclaration enumDecl)
+                    {
+                        if (enumMatch == null) enumMatch = enumDecl;
+                        if (contextModule != null && contextModule.equals(ModuleName.from(enumDecl)))
+                        {
+                            enumMatch = enumDecl;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+        if (constdefMatch != null)
+        {
+            try
+            {
+                C3Type backing = constdefMatch.getType();
+                if (backing != null && backing.getText() != null && !backing.getText().isBlank())
+                {
+                    return backing.getText().strip();
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            return null;
+        }
+        if (enumMatch != null)
+        {
+            try
+            {
+                C3Type backing = enumMatch.getType();
+                if (backing != null && backing.getText() != null && !backing.getText().isBlank())
+                {
+                    return backing.getText().strip();
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            // Untyped enums default to `int` (verified against c3c).
+            return "int";
+        }
+        return null;
     }
 
     /**

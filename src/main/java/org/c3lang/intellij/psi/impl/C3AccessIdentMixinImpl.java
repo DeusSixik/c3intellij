@@ -109,8 +109,8 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 					: findFieldsOrMethodsMatchingAccessName();
 			}
 
-			String query = seq.rootType.getFullName();
-			FullyQualifiedName currentType = seq.rootType;
+			String query = dereference(seq.rootType).getFullName();
+			FullyQualifiedName currentType = dereference(seq.rootType);
 			List<C3StructMemberDeclaration> structMembers = Collections.emptyList();
 
 			for (int i = 0; i < seq.idents.size(); i++)
@@ -124,8 +124,10 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 					FullyQualifiedName nextType = member.getStructPathType();
 					if (nextType != null)
 					{
-						currentType = nextType;
-						query = nextType.getFullName();
+						// `.` auto-dereferences pointers (`ptr.field` reads
+						// through `Foo*`), so member chains stay star-free.
+						currentType = dereference(nextType);
+						query = currentType.getFullName();
 						continue;
 					}
 					if (last && !isInvocationCallee())
@@ -350,9 +352,21 @@ public abstract class C3AccessIdentMixinImpl extends C3PsiNamedElementImpl imple
 		}
 	}
 
-	private static final class AccessIdentSequence
+	/**
+	 * Member lookup works on the pointed-to type: strips trailing pointer
+	 * stars ({@code Foo*} to {@code Foo}), since `.` auto-dereferences.
+	 */
+	private static @NotNull FullyQualifiedName dereference(@NotNull FullyQualifiedName type)
 	{
-		final FullyQualifiedName rootType;
+		String name = type.getName();
+		String clean = name;
+		while (clean.endsWith("*")) clean = clean.substring(0, clean.length() - 1).strip();
+		if (clean.equals(name) || clean.isEmpty()) return type;
+		return new FullyQualifiedName(type.getModule(), clean);
+	}
+
+	private static final class AccessIdentSequence
+	{		final FullyQualifiedName rootType;
 		final List<String> idents;
 
 		AccessIdentSequence(@NotNull FullyQualifiedName rootType, @NotNull List<String> idents)

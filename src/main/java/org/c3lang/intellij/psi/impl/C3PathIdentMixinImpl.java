@@ -7,6 +7,7 @@ import com.intellij.psi.PsiReference;
 import com.intellij.psi.impl.source.tree.LeafPsiElement;
 import com.intellij.psi.util.PsiTreeUtil;
 import org.c3lang.intellij.completion.CompletionExtensionsKt;
+import org.c3lang.intellij.index.InterfaceService;
 import org.c3lang.intellij.index.NameIndexService;
 import org.c3lang.intellij.index.StructService;
 import org.c3lang.intellij.psi.*;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl implements C3PathIdent
 {
@@ -71,6 +73,22 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	@Override
 	public @Nullable FullyQualifiedName findTypeName()
 	{
+		CatchBinding binding = null;
+		try
+		{
+			binding = findCatchBinding();
+		}
+		catch (Exception ignored)
+		{
+		}
+		if (binding != null)
+		{
+			// `catch` bindings are always `fault`; `try` bindings carry the
+			// unwrapped tested type (unknown when it cannot be inferred).
+			if (binding.isCatch()) return new FullyQualifiedName(null, "fault");
+			return tryBindingType(binding);
+		}
+
 		List<C3LocalDeclAfterType> decls = findLocalDeclAfterType();
 		if (decls.size() == 1)
 		{
@@ -97,7 +115,12 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 
 		C3MacroDefinition macroDefinition = PsiTreeUtil.getParentOfType(this, C3MacroDefinition.class);
 
-		if (funcDef != null)
+		// Lambdas do not capture: outer function/macro parameters and
+		// `this`/`self` are invisible inside (only the lambda's own
+		// parameters resolve, via C3ParameterReference).
+		boolean inLambda = enclosingLambda() != null;
+
+		if (funcDef != null && !inLambda)
 		{
 			if ("this".equals(myName) || "self".equals(myName))
 			{
@@ -144,17 +167,36 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			}
 		}
 
-		if (macroDefinition != null && macroDefinition.getMacroParams().getParameterList() != null)
+		if (macroDefinition != null && !inLambda && macroDefinition.getMacroParams().getParameterList() != null)
 		{
-			for (C3ParamDecl paramDecl : macroDefinition.getMacroParams().getParameterList().getParamDeclList())
+			List<C3ParamDecl> macroParamDecls =
+				macroDefinition.getMacroParams().getParameterList().getParamDeclList();
+			for (int index = 0; index < macroParamDecls.size(); index++)
 			{
+				C3ParamDecl paramDecl = macroParamDecls.get(index);
 				C3Parameter macroParam = paramDecl.getParameter();
 				if (macroParam == null) continue;
 				if (myName.equals(macroParam.getNameIdent()) || myName.equals(macroParam.getName()))
 				{
 					C3Type type = macroParam.getType();
 					if (type != null) return macroParamTypeFqn(type, macroDefinition);
+					// A typeless first parameter is the implicit receiver
+					// (`&self`, `self`, `&mutex`, ...): it has the macro
+					// owner type, e.g. `Blake3Output` in
+					// `macro void Blake3Output.chaining_value(&self, ...)`.
+					if (index == 0)
+					{
+						FullyQualifiedName owner = macroOwnerType(macroDefinition);
+						if (owner != null) return owner;
+					}
 				}
+			}
+			// `self`/`this` are sugar for the receiver even when the first
+			// parameter is named otherwise.
+			if ("this".equals(myName) || "self".equals(myName))
+			{
+				FullyQualifiedName owner = macroOwnerType(macroDefinition);
+				if (owner != null) return owner;
 			}
 		}
 
@@ -166,7 +208,7 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 				PsiTreeUtil.collectElementsOfType(compoundStatement, C3VarDecl.class);
 			for (C3VarDecl v : varDecls)
 			{
-				if (v.getTextOffset() < getTextOffset())
+				if (v.getTextOffset() < getTextOffset() && sameLambdaScope(v))
 				{
 					ASTNode identNode = v.getNode().findChildByType(C3Types.IDENT);
 					if (identNode != null && myName.equals(identNode.getText()))
@@ -200,6 +242,13 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	private static @Nullable FullyQualifiedName macroParamTypeFqn(@NotNull C3Type type, @NotNull C3MacroDefinition macro)
 	{
 		return resolveBaseTypeFqn(type, macro.getModuleDefinition(), ModuleName.from(macro));
+	}
+
+	private static @Nullable FullyQualifiedName macroOwnerType(@NotNull C3MacroDefinition macro)
+	{
+		String owner = InterfaceService.methodOwnerTypeName(macro);
+		if (owner == null || owner.isEmpty()) return null;
+		return InterfaceService.resolveOwnerType(owner, ModuleName.from(macro));
 	}
 
 	private static @Nullable FullyQualifiedName resolveBaseTypeFqn(
@@ -252,9 +301,17 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	 */
 	private @Nullable FullyQualifiedName findForeachVarType(@NotNull String myName)
 	{
+		PsiElement lambda = enclosingLambda();
 		C3ForeachStmt stmt = PsiTreeUtil.getParentOfType(this, C3ForeachStmt.class);
 		while (stmt != null)
 		{
+			// Iteration variables do not cross lambda boundaries either way.
+			if (lambda != null && !PsiTreeUtil.isAncestor(lambda, stmt, false)) return null;
+			if (lambda == null && enclosingLambda(stmt) != null)
+			{
+				stmt = PsiTreeUtil.getParentOfType(stmt, C3ForeachStmt.class);
+				continue;
+			}
 			FullyQualifiedName declared = foreachDeclaredType(stmt, myName);
 			if (declared != null) return declared;
 			FullyQualifiedName inferred = foreachElementType(stmt, myName);
@@ -275,7 +332,11 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			if (var.getOptionalType() == null || var.getOptionalType().getType() == null) return null;
 			String text = var.getOptionalType().getType().getText();
 			if (text == null || text.isBlank()) return null;
-			return FullyQualifiedName.parse(text.strip());
+			text = text.strip();
+			// A split-out `&` (address-of iteration) makes the variable a
+			// pointer on top of the declared type.
+			if (!text.endsWith("*") && var.getNode().findChildByType(C3Types.AMP) != null) text += "*";
+			return FullyQualifiedName.parse(text);
 		}
 		return null;
 	}
@@ -284,16 +345,115 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			@NotNull C3ForeachStmt stmt, @NotNull String myName)
 	{
 		if (stmt.getForeachVars() == null || stmt.getExpr() == null) return null;
-		boolean declares = false;
+		C3ForeachVar target = null;
 		for (C3ForeachVar var : stmt.getForeachVars().getForeachVarList())
 		{
 			ASTNode ident = var.getNode().findChildByType(C3Types.IDENT);
-			if (ident != null && myName.equals(ident.getText())) declares = true;
+			if (ident != null && myName.equals(ident.getText())) target = var;
 		}
-		if (!declares) return null;
+		if (target == null) return null;
 		InferredType element = elementTypeOf(stmt.getExpr());
-		if (element == null) return null;
-		return FullyQualifiedName.parse(element.getName());
+		if (element == null)
+		{
+			// Last resort for generic slicing macros
+			// (`find_segment_section_body(mh, seg, sect, DynamicMethod)`):
+			// a trailing type argument at a `$Type` parameter position names
+			// the element type the macro builds its collection from.
+			String substituted = comptimeElementType(stmt.getExpr());
+			if (substituted == null) return null;
+			if (target.getNode().findChildByType(C3Types.AMP) != null) substituted += "*";
+			return FullyQualifiedName.parse(substituted);
+		}
+		String name = element.getName();
+		// `foreach (&dm : ...)` iterates by reference: the variable is a
+		// pointer to the collection's element type.
+		if (target.getNode().findChildByType(C3Types.AMP) != null) name += "*";
+		return FullyQualifiedName.parse(name);
+	}
+
+	/**
+	 * Element type from a `$Type`-parameterized macro call used as the
+	 * iterated collection, e.g. {@code DynamicMethod} for
+	 * {@code find_segment_section_body(mh, seg, sect, DynamicMethod)} backed
+	 * by {@code macro find_segment_section_body(..., $Type)}. Only fires when
+	 * normal inference drew a blank, and only for bare type-name arguments at
+	 * `$Name` parameter positions. Pure PSI walk plus a guarded index check
+	 * for the type-ness of the argument.
+	 */
+	private @Nullable String comptimeElementType(@NotNull C3Expr collection)
+	{
+		if (!(collection instanceof C3CallExpr call) || call.getCallExprTail() == null) return null;
+		C3CallInvocation invocation = call.getCallExprTail().getCallInvocation();
+		if (invocation == null || invocation.getCallArgList() == null
+			|| invocation.getCallArgList().getArgList() == null) return null;
+		C3MacroDefinition macro = resolveCallMacro(call);
+		if (macro == null || macro.getMacroParams() == null
+			|| macro.getMacroParams().getParameterList() == null) return null;
+		List<C3ParamDecl> params = macro.getMacroParams().getParameterList().getParamDeclList();
+		List<C3Arg> args = invocation.getCallArgList().getArgList().getArgList();
+		String last = null;
+		for (int i = 0; i < params.size() && i < args.size(); i++)
+		{
+			C3Parameter param = params.get(i).getParameter();
+			if (param == null || param.getText() == null) continue;
+			if (!param.getText().strip().matches("\\$[A-Za-z_][A-Za-z_0-9]*")) continue;
+			C3Expr arg = args.get(i).getExpr();
+			if (arg == null || arg.getText() == null) continue;
+			String argText = arg.getText().strip();
+			if (!argText.matches("[A-Za-z_][A-Za-z_0-9.:]*")) continue;
+			if (!isTypeNameArg(arg, argText)) continue;
+			last = argText;
+		}
+		return last;
+	}
+
+	private @Nullable C3MacroDefinition resolveCallMacro(@NotNull C3CallExpr call)
+	{
+		try
+		{
+			C3Expr callee = call.getExpr();
+			PsiElement resolved = null;
+			if (callee instanceof C3PathIdentExpr pathIdentExpr)
+			{
+				resolved = pathIdentExpr.getPathIdent().getReference().resolve();
+			}
+			else if (callee instanceof C3CallExpr inner && inner.getCallExprTail() != null
+				&& inner.getCallExprTail().getAccessIdent() != null)
+			{
+				resolved = inner.getCallExprTail().getAccessIdent().getReference().resolve();
+			}
+			return resolved instanceof C3MacroDefinition macro ? macro : null;
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+	}
+
+	private boolean isTypeNameArg(@NotNull C3Expr arg, @NotNull String argText)
+	{
+		// A value in disguise (a resolved local/parameter/field) is not a type.
+		try
+		{
+			if (arg instanceof C3PathIdentExpr pathIdentExpr && pathIdentExpr.getPathIdent().getPath() == null)
+			{
+				PsiElement resolved = pathIdentExpr.getPathIdent().getReference().resolve();
+				if (resolved != null && !(resolved instanceof C3TypeName)) return false;
+			}
+		}
+		catch (Exception ignored)
+		{
+		}
+		// Otherwise the name must declare a type somewhere.
+		try
+		{
+			return !org.c3lang.intellij.index.InterfaceService.INSTANCE
+				.findTypeDeclarations(FullyQualifiedName.parse(argText), getProject()).isEmpty();
+		}
+		catch (Exception e)
+		{
+			return false;
+		}
 	}
 
 	private @Nullable InferredType elementTypeOf(@NotNull C3Expr collection)
@@ -328,6 +488,7 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			{
 				if (!PsiTreeUtil.isAncestor(scope, decl, false)) continue;
 				if (!isVisibleFrom(decl)) continue;
+				if (!sameLambdaScope(decl)) continue;
 				if (decl.getTextOffset() < getTextOffset()
 					&& decl.getNameIdent() != null
 					&& decl.getNameIdent().equals(getNameIdent())
@@ -346,10 +507,14 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	 * A declaration is visible from this use when no nested block boundary
 	 * sits between them, unless the use itself is inside that nested block.
 	 * In other words: the declaration's innermost owning block must also own
-	 * (or be) the use, or own an ancestor of the use.
+	 * (or be) the use, or own an ancestor of the use. Declarations in a
+	 * statement condition (`while (T x = ..., x)`) are additionally scoped
+	 * to that statement: uses after the loop do not see them.
 	 */
 	private boolean isVisibleFrom(@NotNull C3LocalDeclAfterType decl)
 	{
+		PsiElement guard = guardStatement(decl);
+		if (guard != null && !PsiTreeUtil.isAncestor(guard, this, false)) return false;
 		C3CompoundStatement declScope =
 			PsiTreeUtil.getParentOfType(decl, C3CompoundStatement.class);
 		if (declScope == null) return true;
@@ -362,6 +527,54 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		return decl.getTextOffset() < getTextOffset();
 	}
 
+	/**
+	 * Nearest {@code if}/{@code while}/{@code for}/{@code switch} owning the
+	 * declaration through its condition, or {@code null} for ordinary
+	 * block-scoped declarations. Conditions never cross a compound boundary,
+	 * so hitting one first means no guard.
+	 */
+	private static @Nullable PsiElement guardStatement(@NotNull C3LocalDeclAfterType decl)
+	{
+		PsiElement current = decl.getParent();
+		while (current != null)
+		{
+			if (current instanceof C3IfStmt
+				|| current instanceof C3WhileStmt
+				|| current instanceof C3ForStmt
+				|| current instanceof C3SwitchStmt) return current;
+			if (current instanceof C3CompoundStatement) return null;
+			current = current.getParent();
+		}
+		return null;
+	}
+
+
+	/**
+	 * Nearest enclosing lambda (`fn (i) => ...`, `fn int(int i) {...}`), or
+	 * {@code null} outside one. Lambdas do not capture: names from outside
+	 * are invisible inside, and lambda parameters are invisible outside.
+	 */
+	private @Nullable PsiElement enclosingLambda()
+	{
+		return PsiTreeUtil.getParentOfType(
+			(PsiElement) this, C3LambdaDeclExpr.class, C3LambdaDeclShortExpr.class);
+	}
+
+	private static @Nullable PsiElement enclosingLambda(@NotNull PsiElement element)
+	{
+		return PsiTreeUtil.getParentOfType(
+			element, C3LambdaDeclExpr.class, C3LambdaDeclShortExpr.class);
+	}
+
+	/**
+	 * Whether a declaration may be seen from this use across lambda
+	 * boundaries: both must live in the same innermost lambda (or both
+	 * outside any lambda).
+	 */
+	private boolean sameLambdaScope(@NotNull PsiElement declaration)
+	{
+		return Objects.equals(enclosingLambda(), enclosingLambda(declaration));
+	}
 
 	private boolean hasLocalDeclBeforeUse()
 	{
@@ -420,6 +633,7 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	@Override
 	public @NotNull PsiReference getReference()
 	{
+		if (hasCatchBindingBeforeUse()) return new C3CatchBindingReference(this);
 		if (hasLocalDeclBeforeUse()) return new C3LocalDeclAfterTypeReference(this);
 		if (hasParameterBeforeUse()) return new C3ParameterReference(this);
 		if (hasForeachVarBeforeUse()) return new C3ForeachVarReference(this);
@@ -428,10 +642,158 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 		return new C3LocalDeclAfterTypeReference(this);
 	}
 
+	private boolean hasCatchBindingBeforeUse()
+	{
+		if (!(this instanceof C3PathIdentMixinImpl mixin)) return false;
+		try
+		{
+			return mixin.findCatchBinding() != null;
+		}
+		catch (Exception e)
+		{
+			return false;
+		}
+	}
+
 	private boolean hasForeachVarBeforeUse()
 	{
 		if (!(this instanceof C3PathIdentMixinImpl mixin)) return false;
 		return mixin.findForeachVar() != null;
+	}
+
+	/**
+	 * An {@code if (catch)}/{@code if (try)} binding in whose then-branch
+	 * this use sits, e.g. {@code err} in {@code if (catch err = x) {...}}.
+	 * Bindings shadow everything else and are scoped to the branch, so they
+	 * are searched before locals, parameters and iteration variables.
+	 */
+	@Nullable CatchBinding findCatchBinding()
+	{
+		String myName = getNameIdent();
+		if (myName == null) return null;
+		PsiElement lambda = enclosingLambda();
+		PsiElement child = this;
+		PsiElement parent = getParent();
+		int depth = 0;
+		while (parent != null && depth < 16)
+		{
+			if (parent instanceof C3IfStmt ifStmt)
+			{
+				// Bindings do not cross lambda boundaries either way.
+				if (lambda != null && !PsiTreeUtil.isAncestor(lambda, ifStmt, false)) return null;
+				if (lambda == null && enclosingLambda(ifStmt) != null) return null;
+				if (isThenBranch(ifStmt, child))
+				{
+					CatchBinding binding = bindingInCond(ifStmt, myName);
+					if (binding != null) return binding;
+				}
+			}
+			child = parent;
+			parent = parent.getParent();
+			depth++;
+		}
+		return null;
+	}
+
+	private static boolean isThenBranch(@NotNull C3IfStmt ifStmt, @NotNull PsiElement child)
+	{
+		if (child == ifStmt.getCompoundStatement() || child == ifStmt.getStatement()) return true;
+		return false;
+	}
+
+	private static @Nullable CatchBinding bindingInCond(@NotNull C3IfStmt ifStmt, @NotNull String name)
+	{
+		C3ParenCond paren = ifStmt.getParenCond();
+		C3Cond cond = paren != null ? paren.getCond() : null;
+		if (cond == null) return null;
+		for (C3CatchUnwrap unwrap : PsiTreeUtil.findChildrenOfType(cond, C3CatchUnwrap.class))
+		{
+			String binding = unwrap instanceof C3CatchUnwrapMixin mixin ? mixin.getBindingName() : null;
+			if (name.equals(binding)) return new CatchBinding(unwrap, true);
+		}
+		for (C3TryUnwrapChain chain : PsiTreeUtil.findChildrenOfType(cond, C3TryUnwrapChain.class))
+		{
+			for (C3TryUnwrap unwrap : chain.getTryUnwrapList())
+			{
+				String binding = unwrap instanceof C3TryUnwrapMixin mixin ? mixin.getBindingName() : null;
+				if (name.equals(binding)) return new CatchBinding(unwrap, false);
+			}
+		}
+		return null;
+	}
+
+	record CatchBinding(@NotNull C3PsiElement unwrap, boolean isCatch)
+	{
+	}
+
+	private @Nullable FullyQualifiedName tryBindingType(@NotNull CatchBinding binding)
+	{
+		if (binding.isCatch() || !(binding.unwrap() instanceof C3TryUnwrap tryUnwrap)) return null;
+		C3Expr tested;
+		try
+		{
+			tested = tryUnwrap.getExpr();
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+		if (tested == null) return null;
+		// The tested expression is usually a bare identifier: reuse its
+		// declaration type without full inference. Anything else goes
+		// through inference with its own depth budget (cycle-safe: the
+		// binding never matches inside its own condition).
+		try
+		{
+			if (tested instanceof C3PathIdentExpr pathExpr && pathExpr.getPathIdent().getPath() == null)
+			{
+				FullyQualifiedName fqn = pathExpr.getPathIdent().findTypeName();
+				if (fqn == null) return null;
+				return FullyQualifiedName.parse(stripOptionalSuffix(
+					org.c3lang.intellij.types.TypeChecker.normalize(fqn.getFullName())));
+			}
+			InferredType inferred = org.c3lang.intellij.types.TypeChecker.infer(tested);
+			if (inferred == null) return null;
+			return FullyQualifiedName.parse(stripOptionalSuffix(
+				org.c3lang.intellij.types.TypeChecker.normalize(inferred.getName())));
+		}
+		catch (Exception e)
+		{
+			return null;
+		}
+	}
+
+	private static @NotNull String stripOptionalSuffix(@NotNull String typeName)
+	{
+		if ((typeName.endsWith("?") || typeName.endsWith("!")) && !typeName.endsWith("*"))
+		{
+			return typeName.substring(0, typeName.length() - 1);
+		}
+		return typeName;
+	}
+
+	private static class C3CatchBindingReference extends C3ReferenceBase<C3PathIdent>
+	{
+		C3CatchBindingReference(@NotNull C3PathIdent element)
+		{
+			super(element);
+		}
+
+		@Override
+		public @NotNull Collection<C3PsiElement> multiResolve()
+		{
+			if (!(myElement instanceof C3PathIdentMixinImpl mixin)) return Collections.emptyList();
+			CatchBinding binding;
+			try
+			{
+				binding = mixin.findCatchBinding();
+			}
+			catch (Exception e)
+			{
+				return Collections.emptyList();
+			}
+			return binding != null ? Collections.singletonList(binding.unwrap()) : Collections.emptyList();
+		}
 	}
 
 	private static class C3LocalDeclAfterTypeReference extends C3ReferenceBase<C3PathIdent>
@@ -457,9 +819,16 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 	{
 		String myName = getNameIdent();
 		if (myName == null) return null;
+		PsiElement lambda = enclosingLambda();
 		C3ForeachStmt stmt = PsiTreeUtil.getParentOfType(this, C3ForeachStmt.class);
 		while (stmt != null)
 		{
+			if (lambda != null && !PsiTreeUtil.isAncestor(lambda, stmt, false)) return null;
+			if (lambda == null && enclosingLambda(stmt) != null)
+			{
+				stmt = PsiTreeUtil.getParentOfType(stmt, C3ForeachStmt.class);
+				continue;
+			}
 			if (stmt.getForeachVars() != null)
 			{
 				for (C3ForeachVar var : stmt.getForeachVars().getForeachVarList())
@@ -518,12 +887,17 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			}
 			if (params == null) return Collections.emptyList();
 
+			// Lambdas do not capture: only parameters in the same innermost
+			// lambda (or outside any lambda, for uses outside) are visible.
+			PsiElement useLambda = PsiTreeUtil.getParentOfType(
+				myElement, C3LambdaDeclExpr.class, C3LambdaDeclShortExpr.class);
 			for (C3Parameter param : params)
 			{
-				if (param.getNameIdent() != null && param.getNameIdent().equals(myElement.getNameIdent()))
-				{
-					return Collections.singleton(param);
-				}
+				if (param.getNameIdent() == null || !param.getNameIdent().equals(myElement.getNameIdent())) continue;
+				PsiElement paramLambda = PsiTreeUtil.getParentOfType(
+					param, C3LambdaDeclExpr.class, C3LambdaDeclShortExpr.class);
+				if (!Objects.equals(useLambda, paramLambda)) continue;
+				return Collections.singleton(param);
 			}
 			return Collections.emptyList();
 		}

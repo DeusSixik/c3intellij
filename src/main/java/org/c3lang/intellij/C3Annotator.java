@@ -9,6 +9,9 @@ import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.TextRange;
 import com.intellij.psi.PsiElement;
+import com.intellij.psi.PsiPolyVariantReference;
+import com.intellij.psi.PsiReference;
+import com.intellij.psi.ResolveResult;
 import com.intellij.psi.tree.TokenSet;
 import com.intellij.psi.util.PsiTreeUtil;
 import org.c3lang.intellij.annotation.fix.AddDynamicAttributeFix;
@@ -460,6 +463,10 @@ public class C3Annotator implements Annotator
             CallChecker.checkCall(callExpr, annotationHolder);
             AttributeChecks.checkCallAttributes(callExpr, annotationHolder);
         }
+        else if (psiElement instanceof C3IfStmt ifStmt)
+        {
+            annotateIfCatchTry(ifStmt, annotationHolder);
+        }
         else if (psiElement instanceof C3StructDeclaration structDecl)
         {
             annotateStructDeclaration(structDecl, annotationHolder);
@@ -471,6 +478,10 @@ public class C3Annotator implements Annotator
         else if (psiElement instanceof C3FuncDef funcDef)
         {
             annotateFuncDef(funcDef, annotationHolder);
+        }
+        else if (psiElement instanceof C3FuncDefinition funcDefinition)
+        {
+            annotateFuncDefinition(funcDefinition, annotationHolder);
         }
         else if (psiElement instanceof C3MacroDefinition macroDef)
         {
@@ -485,6 +496,84 @@ public class C3Annotator implements Annotator
         {
             AttributeChecks.checkAttribute(attribute, annotationHolder);
         }
+    }
+
+    private static boolean isInThenBranch(@NotNull C3IfStmt ifStmt, @NotNull C3PathIdent pathIdent)
+    {
+        if (ifStmt.getCompoundStatement() != null)
+        {
+            return PsiTreeUtil.isAncestor(ifStmt.getCompoundStatement(), pathIdent, false);
+        }
+        return ifStmt.getStatement() != null && PsiTreeUtil.isAncestor(ifStmt.getStatement(), pathIdent, false);
+    }
+
+    private static boolean bindsCatchOrTryName(@NotNull C3IfStmt ifStmt, @NotNull String name)
+    {
+        C3ParenCond paren = ifStmt.getParenCond();
+        C3Cond cond = paren != null ? paren.getCond() : null;
+        if (cond == null) return false;
+        for (C3CatchUnwrap unwrap : PsiTreeUtil.findChildrenOfType(cond, C3CatchUnwrap.class))
+        {
+            String binding = unwrap instanceof C3CatchUnwrapMixin mixin ? mixin.getBindingName() : null;
+            if (name.equals(binding)) return true;
+        }
+        for (C3TryUnwrapChain chain : PsiTreeUtil.findChildrenOfType(cond, C3TryUnwrapChain.class))
+        {
+            for (C3TryUnwrap unwrap : chain.getTryUnwrapList())
+            {
+                String binding = unwrap instanceof C3TryUnwrapMixin mixin ? mixin.getBindingName() : null;
+                if (name.equals(binding)) return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * {@code if (catch)} and {@code if (try)} only accept Optional-tested
+     * expressions: anything with a known non-Optional type is a compile
+     * error in c3c, so it is flagged here. Unknown types (failed inference,
+     * comptime parameters) stay silent.
+     */
+    private void annotateIfCatchTry(@NotNull C3IfStmt ifStmt, @NotNull AnnotationHolder holder)
+    {
+        if (DumbService.isDumb(ifStmt.getProject())) return;
+        C3ParenCond paren = ifStmt.getParenCond();
+        C3Cond cond = paren != null ? paren.getCond() : null;
+        if (cond == null) return;
+        for (C3CatchUnwrap unwrap : PsiTreeUtil.findChildrenOfType(cond, C3CatchUnwrap.class))
+        {
+            if (unwrap.getCatchUnwrapList() == null) continue;
+            for (C3Expr tested : unwrap.getCatchUnwrapList().getExprList())
+            {
+                checkUnwrapOperand(tested, false, holder);
+            }
+        }
+        for (C3TryUnwrapChain chain : PsiTreeUtil.findChildrenOfType(cond, C3TryUnwrapChain.class))
+        {
+            for (C3TryUnwrap unwrap : chain.getTryUnwrapList())
+            {
+                if (unwrap.getExpr() != null) checkUnwrapOperand(unwrap.getExpr(), true, holder);
+            }
+        }
+    }
+
+    private void checkUnwrapOperand(@NotNull C3Expr tested, boolean isTry, @NotNull AnnotationHolder holder)
+    {
+        InferredType inferred;
+        try
+        {
+            inferred = TypeChecker.infer(tested);
+        }
+        catch (Exception e)
+        {
+            return;
+        }
+        if (inferred == null || TypeChecker.isOptionalName(inferred.getName())) return;
+        if (TypeChecker.isComptimeParam(inferred.getName())) return;
+        String message = isTry
+            ? "Expected an optional expression to 'try' here. If it isn't an optional, remove 'try'."
+            : "This expression is not optional, did you add it by mistake?";
+        holder.newAnnotation(HighlightSeverity.ERROR, message).range(tested).create();
     }
 
     private void annotateStructDeclaration(@NotNull C3StructDeclaration structDecl, @NotNull AnnotationHolder holder)
@@ -610,6 +699,63 @@ public class C3Annotator implements Annotator
     }
 
     /**
+     * Expression bodies live on the definition level
+     * (`func_definition ::= func_def (macro_func_body | EOS)`), so the
+     * `=> expr` range is only annotatable here, not on the bare `func_def`.
+     */
+    private void annotateFuncDefinition(@NotNull C3FuncDefinition definition, @NotNull AnnotationHolder holder)
+    {
+        C3FuncDef funcDef = definition.getFuncDef();
+        if (funcDef == null) return;
+        annotateImpliesBody(funcDef, holder);
+    }
+
+    /**
+     * Expression bodies (`fn int f(int x) => x * x;`, macro `=>` bodies) are
+     * `{ return expr; }` in disguise: the expression must fit the declared
+     * return type. Void functions returning an expression body are fine.
+     */
+    private void annotateImpliesBody(@NotNull C3FuncDef funcDef, @NotNull AnnotationHolder holder)
+    {
+        C3FuncDefinition definition = PsiTreeUtil.getParentOfType(funcDef, C3FuncDefinition.class);
+        C3MacroFuncBody body = definition != null ? definition.getMacroFuncBody() : null;
+        checkImpliesBody(body, funcDef.getReturnType(), funcDef.getProject(), ModuleName.from(funcDef), holder);
+    }
+
+    private void checkImpliesBody(
+            @Nullable C3MacroFuncBody body,
+            @Nullable ShortType returnType,
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull AnnotationHolder holder)
+    {
+        if (body == null || DumbService.isDumb(project)) return;
+        C3Expr expr;
+        try
+        {
+            if (body.getCompoundStatement() != null) return;
+            expr = body.getExpr();
+        }
+        catch (Exception e)
+        {
+            return;
+        }
+        if (expr == null) return;
+        String returnText = returnType != null && returnType.getValue() != null ? returnType.getValue() : "void";
+        if (TypeChecker.isVoidType(returnText.strip())) return;
+        String error;
+        try
+        {
+            error = TypeChecker.returnError(project, contextModule, returnText, TypeChecker.infer(expr), expr);
+        }
+        catch (Exception e)
+        {
+            return;
+        }
+        if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(expr).create();
+    }
+
+    /**
      * The program entry point cannot return an Optional.
      */
     private void annotateMainOptional(@NotNull C3FuncDef funcDef, @NotNull AnnotationHolder holder)
@@ -636,6 +782,21 @@ public class C3Annotator implements Annotator
 
     private void annotateMacroDefinition(@NotNull C3MacroDefinition macroDef, @NotNull AnnotationHolder holder)
     {
+        C3MacroFuncBody macroBody;
+        try
+        {
+            macroBody = macroDef.getMacroFuncBody();
+        }
+        catch (Exception e)
+        {
+            macroBody = null;
+        }
+        if (macroBody != null)
+        {
+            ShortType macroReturn = macroDef.getReturnType();
+            checkImpliesBody(macroBody, macroReturn, macroDef.getProject(),
+                ModuleName.from(macroDef), holder);
+        }
         String name = macroDef.getName();
         if (name == null || name.isEmpty() || name.charAt(0) == '@') return;
         // `@safemacro` explicitly allows dropping the `@` prefix.
@@ -1124,9 +1285,30 @@ public class C3Annotator implements Annotator
 
         if ("this".equals(name) || "self".equals(name))
         {
+            if (enclosingLambda(pathIdent) != null)
+            {
+                annotateCapture(pathIdent, nameElement, name, annotationHolder);
+                return;
+            }
             annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
                 .textAttributes(C3SyntaxHighlighter.PARAMETER_KEY).range(nameElement).create();
             return;
+        }
+
+        PsiElement lambda = enclosingLambda(pathIdent);
+        if (lambda != null)
+        {
+            PsiElement reference = referenceInsideLambda(pathIdent, name, lambda);
+            if (reference != null)
+            {
+                // Resolves within the lambda (own local, own parameter): a
+                // normal highlight below, never a capture.
+            }
+            else if (matchesOuterParamOrBinding(pathIdent, name, lambda))
+            {
+                annotateCapture(pathIdent, nameElement, name, annotationHolder);
+                return;
+            }
         }
 
         PsiElement current = pathIdent;
@@ -1142,11 +1324,25 @@ public class C3Annotator implements Annotator
                         ASTNode idNode = v.getNode().findChildByType(C3Types.IDENT);
                         if (idNode != null && name.equals(idNode.getText()))
                         {
+                            if (lambda != null && !PsiTreeUtil.isAncestor(lambda, v, false))
+                            {
+                                annotateCapture(pathIdent, nameElement, name, annotationHolder);
+                                return;
+                            }
                             annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
                                 .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(nameElement).create();
                             return;
                         }
                     }
+                }
+            }
+            else if (current instanceof C3IfStmt ifStmt)
+            {
+                if (isInThenBranch(ifStmt, pathIdent) && bindsCatchOrTryName(ifStmt, name))
+                {
+                    annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
+                        .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(nameElement).create();
+                    return;
                 }
             }
             else if (current instanceof C3CompoundStatement compoundStatement)
@@ -1165,6 +1361,11 @@ public class C3Annotator implements Annotator
                                 {
                                     if (name.equals(decl.getNameIdent()))
                                     {
+                                        if (lambda != null && !PsiTreeUtil.isAncestor(lambda, decl, false))
+                                        {
+                                            annotateCapture(pathIdent, nameElement, name, annotationHolder);
+                                            return;
+                                        }
                                         annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
                                             .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(nameElement).create();
                                         return;
@@ -1174,9 +1375,15 @@ public class C3Annotator implements Annotator
                         }
                         else if (stmt.getVarStmt() != null && stmt.getVarStmt().getVarDecl() != null)
                         {
-                            ASTNode idNode = stmt.getVarStmt().getVarDecl().getNode().findChildByType(C3Types.IDENT);
-                            if (idNode != null && name.equals(idNode.getText()))
+                        ASTNode idNode = stmt.getVarStmt().getVarDecl().getNode().findChildByType(C3Types.IDENT);
+                        if (idNode != null && name.equals(idNode.getText()))
+                        {
+                            if (lambda != null
+                                && !PsiTreeUtil.isAncestor(lambda, stmt.getVarStmt().getVarDecl(), false))
                             {
+                                annotateCapture(pathIdent, nameElement, name, annotationHolder);
+                                return;
+                            }
                                 annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
                                     .textAttributes(C3SyntaxHighlighter.LOCAL_VARIABLE_KEY).range(nameElement).create();
                                 return;
@@ -1197,6 +1404,11 @@ public class C3Annotator implements Annotator
                         {
                             if (node.getElementType() == C3Types.IDENT && name.equals(node.getText()))
                             {
+                                if (lambda != null && !PsiTreeUtil.isAncestor(lambda, p, false))
+                                {
+                                    annotateCapture(pathIdent, nameElement, name, annotationHolder);
+                                    return;
+                                }
                                 annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
                                     .textAttributes(C3SyntaxHighlighter.PARAMETER_KEY).range(nameElement).create();
                                 return;
@@ -1218,6 +1430,11 @@ public class C3Annotator implements Annotator
                         {
                             if (node.getElementType() == C3Types.IDENT && name.equals(node.getText()))
                             {
+                                if (lambda != null && !PsiTreeUtil.isAncestor(lambda, p, false))
+                                {
+                                    annotateCapture(pathIdent, nameElement, name, annotationHolder);
+                                    return;
+                                }
                                 annotationHolder.newSilentAnnotation(HighlightSeverity.TEXT_ATTRIBUTES)
                                     .textAttributes(C3SyntaxHighlighter.PARAMETER_KEY).range(nameElement).create();
                                 return;
@@ -1228,5 +1445,143 @@ public class C3Annotator implements Annotator
             }
             current = current.getParent();
         }
+    }
+
+    private static @Nullable PsiElement enclosingLambda(@NotNull PsiElement element)
+    {
+        return PsiTreeUtil.getParentOfType(element, C3LambdaDeclExpr.class, C3LambdaDeclShortExpr.class);
+    }
+
+    /**
+     * What the name resolves to without leaving the lambda: its own
+     * parameter, a lambda-local declaration, or a lambda-local foreach /
+     * catch / try binding. Anything else means the outer-name check decides
+     * (capture error or a global).
+     */
+    private static @Nullable PsiElement referenceInsideLambda(
+            @NotNull C3PathIdent pathIdent, @NotNull String name, @NotNull PsiElement lambda)
+    {
+        try
+        {
+            PsiReference reference = pathIdent.getReference();
+            if (reference != null)
+            {
+                for (ResolveResult result : ((PsiPolyVariantReference) reference).multiResolve(false))
+                {
+                    PsiElement element = result.getElement();
+                    if (element != null && PsiTreeUtil.isAncestor(lambda, element, false)) return element;
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        int useOffset = pathIdent.getTextOffset();
+        for (C3LocalDeclAfterType decl : PsiTreeUtil.findChildrenOfType(lambda, C3LocalDeclAfterType.class))
+        {
+            if (name.equals(decl.getNameIdent()) && decl.getTextOffset() < useOffset) return decl;
+        }
+        for (C3VarDecl varDecl : PsiTreeUtil.findChildrenOfType(lambda, C3VarDecl.class))
+        {
+            ASTNode idNode = varDecl.getNode().findChildByType(C3Types.IDENT);
+            if (idNode != null && name.equals(idNode.getText()) && varDecl.getTextOffset() < useOffset) return varDecl;
+        }
+        for (C3ForeachVar var : PsiTreeUtil.findChildrenOfType(lambda, C3ForeachVar.class))
+        {
+            ASTNode idNode = var.getNode().findChildByType(C3Types.IDENT);
+            if (idNode != null && name.equals(idNode.getText()) && var.getTextOffset() < useOffset) return var;
+        }
+        return null;
+    }
+
+    /**
+     * Whether the name matches an outer function/macro parameter, an outer
+     * lambda's parameter, or an outer catch/try binding: all invisible
+     * inside the lambda (checked separately from the highlight walk, whose
+     * function-parameter branches only see default-value positions).
+     */
+    private static boolean matchesOuterParamOrBinding(
+            @NotNull C3PathIdent pathIdent, @NotNull String name, @NotNull PsiElement lambda)
+    {
+        C3FuncDefinition funcDef = PsiTreeUtil.getParentOfType(pathIdent, C3FuncDefinition.class);
+        if (funcDef != null && funcDef.getFuncDef() != null
+            && funcDef.getFuncDef().getFnParameterList() != null
+            && funcDef.getFuncDef().getFnParameterList().getParameterList() != null)
+        {
+            for (C3ParamDecl paramDecl : funcDef.getFuncDef().getFnParameterList().getParameterList().getParamDeclList())
+            {
+                C3Parameter parameter = paramDecl.getParameter();
+                if (parameter != null && name.equals(parameter.getNameIdent())) return true;
+            }
+        }
+        C3MacroDefinition macroDef = PsiTreeUtil.getParentOfType(pathIdent, C3MacroDefinition.class);
+        if (macroDef != null && macroDef.getMacroParams() != null
+            && macroDef.getMacroParams().getParameterList() != null)
+        {
+            for (C3ParamDecl paramDecl : macroDef.getMacroParams().getParameterList().getParamDeclList())
+            {
+                C3Parameter parameter = paramDecl.getParameter();
+                if (parameter != null && name.equals(parameter.getNameIdent())) return true;
+            }
+        }
+        // Walk enclosing lambdas beyond the innermost one, plus any `if`
+        // whose then-branch holds the lambda: bindings there are equally
+        // invisible inside.
+        PsiElement current = lambda.getParent();
+        while (current != null)
+        {
+            if (current instanceof C3LambdaDeclExpr || current instanceof C3LambdaDeclShortExpr)
+            {
+                if (current != lambda && lambdaParamMatches(current, name)) return true;
+            }
+            if (current instanceof C3IfStmt ifStmt && isElementInThenBranch(ifStmt, lambda))
+            {
+                if (bindsCatchOrTryName(ifStmt, name)) return true;
+            }
+            current = current.getParent();
+        }
+        return false;
+    }
+
+    private static boolean isElementInThenBranch(@NotNull C3IfStmt ifStmt, @NotNull PsiElement element)
+    {
+        if (ifStmt.getCompoundStatement() != null)
+        {
+            return PsiTreeUtil.isAncestor(ifStmt.getCompoundStatement(), element, false);
+        }
+        return ifStmt.getStatement() != null && PsiTreeUtil.isAncestor(ifStmt.getStatement(), element, false);
+    }
+
+    private static boolean lambdaParamMatches(@NotNull PsiElement lambdaExpr, @NotNull String name)
+    {
+        C3LambdaDecl decl = null;
+        if (lambdaExpr instanceof C3LambdaDeclExpr full) decl = full.getLambdaDecl();
+        else if (lambdaExpr instanceof C3LambdaDeclShortExpr shortExpr) decl = shortExpr.getLambdaDecl();
+        if (decl == null || decl.getFnParameterList() == null
+            || decl.getFnParameterList().getParameterList() == null) return false;
+        for (C3ParamDecl paramDecl : decl.getFnParameterList().getParameterList().getParamDeclList())
+        {
+            C3Parameter parameter = paramDecl.getParameter();
+            if (parameter != null && name.equals(parameter.getNameIdent())) return true;
+        }
+        return false;
+    }
+
+    /**
+     * A use inside a lambda that would resolve outside it: lambdas do not
+     * capture enclosing locals, parameters or `self` (verified against
+     * {@code c3c}, which reports the name as not found).
+     */
+    private void annotateCapture(
+            @NotNull C3PathIdent pathIdent,
+            @NotNull PsiElement nameElement,
+            @NotNull String name,
+            @NotNull AnnotationHolder holder)
+    {
+        holder.newAnnotation(
+                HighlightSeverity.ERROR,
+                "Cannot capture '" + name + "' from the enclosing function: lambdas do not close over outer variables.")
+            .range(nameElement != null ? nameElement : (PsiElement) pathIdent)
+            .create();
     }
 }

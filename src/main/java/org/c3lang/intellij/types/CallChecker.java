@@ -1,5 +1,6 @@
 package org.c3lang.intellij.types;
 
+import com.intellij.lang.ASTNode;
 import com.intellij.lang.annotation.AnnotationHolder;
 import com.intellij.lang.annotation.HighlightSeverity;
 import com.intellij.openapi.project.DumbService;
@@ -22,6 +23,8 @@ import org.c3lang.intellij.psi.C3CallInvocation;
 import org.c3lang.intellij.psi.C3CallablePsiElement;
 import org.c3lang.intellij.psi.C3Expr;
 import org.c3lang.intellij.psi.C3ExprStmt;
+import org.c3lang.intellij.psi.C3LambdaDecl;
+import org.c3lang.intellij.psi.C3LambdaDeclShortExpr;
 import org.c3lang.intellij.psi.C3FuncDef;
 import org.c3lang.intellij.psi.C3FuncDefinition;
 import org.c3lang.intellij.psi.C3GroupedExpr;
@@ -113,16 +116,12 @@ public final class CallChecker
         if (methodIdent != null)
         {
             // Tail carries both the method and the invocation.
-            C3CallablePsiElement callable = resolveCallable(methodIdent.getReference());
-            if (callable == null) return null;
-            return new Callee(callable, ownerOf(callable), isStaticReceiver(call.getExpr()));
+            return selectOverload(call, tail, methodIdent.getReference(), isStaticReceiver(call.getExpr()), false);
         }
         C3Expr calleeExpr = call.getExpr();
         if (calleeExpr instanceof C3PathIdentExpr pathIdentExpr)
         {
-            C3CallablePsiElement callable = resolveCallable(pathIdentExpr.getPathIdent().getReference());
-            if (callable == null) return null;
-            return new Callee(callable, ownerOf(callable), false);
+            return selectOverload(call, tail, pathIdentExpr.getPathIdent().getReference(), false, true);
         }
         if (calleeExpr instanceof C3PathAtIdentExpr pathAtIdentExpr)
         {
@@ -137,11 +136,278 @@ public final class CallChecker
             && inner.getCallExprTail().getCallInvocation() == null)
         {
             // Split form: recv.method(args) or Type.method(args).
-            C3CallablePsiElement callable = resolveCallable(inner.getCallExprTail().getAccessIdent().getReference());
-            if (callable == null) return null;
-            return new Callee(callable, ownerOf(callable), isStaticReceiver(inner.getExpr()));
+            return selectOverload(
+                call, tail, inner.getCallExprTail().getAccessIdent().getReference(), isStaticReceiver(inner.getExpr()), false);
         }
         return null;
+    }
+
+    /**
+     * Callee selection across overloads sharing one name (e.g. a 1-parameter
+     * {@code macro alloc($Type)} and a 2-parameter {@code fn alloc(usz, ...)}):
+     * declarations from the call's own module shadow imported ones first
+     * (verified against c3c: a same-module declaration wins even when its
+     * signature fits worse), then the first candidate whose arity fits wins,
+     * then argument types break remaining ties. Single candidates and total
+     * ties keep the previous first-wins behavior.
+     */
+    private static @Nullable Callee selectOverload(
+            @NotNull C3CallExpr call,
+            @NotNull C3CallExprTail tail,
+            @NotNull PsiReference reference,
+            boolean staticReceiver,
+            boolean plainCall)
+    {
+        List<C3CallablePsiElement> candidates = overloadCandidates(reference);
+        if (candidates.isEmpty()) return null;
+        // Method dispatch resolves by receiver type, never by caller module.
+        if (plainCall) candidates = preferSameModule(call, candidates);
+        if (candidates.isEmpty()) return null;
+        if (candidates.size() == 1)
+        {
+            C3CallablePsiElement only = candidates.get(0);
+            return new Callee(only, ownerOf(only), staticReceiver);
+        }
+        C3CallInvocation invocation = tail.getCallInvocation();
+        List<ArgInfo> args = invocation != null ? buildArgs(invocation) : List.of();
+        List<C3CallablePsiElement> fitting = new ArrayList<>();
+        for (C3CallablePsiElement candidate : candidates)
+        {
+            if (arityFits(candidate, staticReceiver, args)) fitting.add(candidate);
+        }
+        if (fitting.size() == 1) return picked(call, fitting.get(0), staticReceiver);
+        if (fitting.size() > 1)
+        {
+            // Several candidates fit by arity (e.g. two 2-parameter `alloc`
+            // overloads): prefer the first whose argument types all match,
+            // mirroring the compiler's overload choice.
+            for (C3CallablePsiElement candidate : fitting)
+            {
+                if (typeMismatches(call, candidate, staticReceiver, args) == 0)
+                {
+                    return picked(call, candidate, staticReceiver);
+                }
+            }
+            return picked(call, fitting.get(0), staticReceiver);
+        }
+        C3CallablePsiElement first = candidates.get(0);
+        return new Callee(first, ownerOf(first), staticReceiver);
+    }
+
+    private static @NotNull Callee picked(
+            @NotNull C3CallExpr call, @NotNull C3CallablePsiElement callable, boolean staticReceiver)
+    {
+        return new Callee(callable, ownerOf(callable), staticReceiver);
+    }
+
+    /**
+     * Number of per-argument type mismatches for a candidate, using the same
+     * positional/named/vaarg slot mapping as the annotating match. Unknown
+     * (un-inferrable) arguments never count against a candidate.
+     */
+    private static int typeMismatches(
+            @NotNull C3CallExpr call,
+            @NotNull C3CallablePsiElement candidate,
+            boolean staticReceiver,
+            @NotNull List<ArgInfo> args)
+    {
+        Project project = call.getProject();
+        ModuleName contextModule = ModuleName.from(call);
+        Signature signature;
+        try
+        {
+            signature = buildSignature(candidate);
+        }
+        catch (Exception e)
+        {
+            return 0;
+        }
+        List<ParamInfo> params = signature.params;
+        String ownerText = ownerOf(candidate);
+        int startIndex = 0;
+        if (ownerText != null && !staticReceiver && !params.isEmpty()
+            && InterfaceService.firstParameterMatchesOwner(signature.paramTypes, signature.parameterList, ownerText))
+        {
+            startIndex = 1;
+        }
+        int vaargIndex = -1;
+        for (int i = startIndex; i < params.size(); i++)
+        {
+            if (params.get(i).vaarg)
+            {
+                vaargIndex = i;
+                break;
+            }
+        }
+        int mismatches = 0;
+        int positionalCount = 0;
+        for (ArgInfo arg : args)
+        {
+            if (arg.splat) continue;
+            if (arg.named)
+            {
+                if (arg.name == null) continue;
+                int index = findParam(params, startIndex, arg.name);
+                if (index < 0) return Integer.MAX_VALUE;
+                if (argMismatch(project, contextModule, arg, params.get(index), index == vaargIndex) != null)
+                {
+                    mismatches++;
+                }
+                continue;
+            }
+            ParamInfo slot = null;
+            int slotIndex = -1;
+            int seen = 0;
+            for (int i = startIndex; i < params.size(); i++)
+            {
+                if (i == vaargIndex) continue;
+                if (seen == positionalCount)
+                {
+                    slot = params.get(i);
+                    slotIndex = i;
+                    break;
+                }
+                seen++;
+            }
+            if (slot == null)
+            {
+                if (vaargIndex >= 0
+                    && argMismatch(project, contextModule, arg, params.get(vaargIndex), true) != null)
+                {
+                    mismatches++;
+                }
+            }
+            else if (argMismatch(project, contextModule, arg, slot, false) != null)
+            {
+                mismatches++;
+            }
+            positionalCount++;
+        }
+        return mismatches;
+    }
+
+    private static @NotNull List<C3CallablePsiElement> overloadCandidates(@NotNull PsiReference reference)
+    {
+        List<C3CallablePsiElement> result = new ArrayList<>();
+        try
+        {
+            if (reference instanceof org.c3lang.intellij.psi.reference.C3ReferenceBase<?> base)
+            {
+                for (C3PsiElement element : base.multiResolve())
+                {
+                    if (element instanceof C3CallablePsiElement callable && !result.contains(callable))
+                    {
+                        result.add(callable);
+                    }
+                }
+                if (!result.isEmpty()) return result;
+            }
+            PsiElement resolved = reference.resolve();
+            if (resolved instanceof C3CallablePsiElement callable) result.add(callable);
+        }
+        catch (Exception ignored)
+        {
+        }
+        return result;
+    }
+
+    /**
+     * Same-module declarations shadow imported ones for plain calls: when at
+     * least one candidate lives in the call's own module, the rest are
+     * invisible to checking (verified against c3c, which reports against the
+     * local definition even when an imported overload would fit better).
+     * Without a same-module candidate everything stays visible.
+     */
+    private static @NotNull List<C3CallablePsiElement> preferSameModule(
+            @NotNull C3CallExpr call,
+            @NotNull List<C3CallablePsiElement> candidates)
+    {
+        ModuleName callModule;
+        try
+        {
+            callModule = ModuleName.from(call);
+        }
+        catch (Exception e)
+        {
+            return candidates;
+        }
+        if (callModule == null) return candidates;
+        List<C3CallablePsiElement> same = new ArrayList<>();
+        for (C3CallablePsiElement candidate : candidates)
+        {
+            ModuleName candidateModule = null;
+            try
+            {
+                candidateModule = ModuleName.from(candidate);
+            }
+            catch (Exception ignored)
+            {
+            }
+            if (callModule.equals(candidateModule)) same.add(candidate);
+        }
+        return same.isEmpty() ? candidates : same;
+    }
+
+    /**
+     * Whether the call arguments fit the candidate's parameters: every named
+     * argument names a real parameter, and the positional count covers the
+     * required parameters without overflowing a non-variadic list. Splat
+     * forwards ({@code $vasplat}) and trailing blocks are lenient: their
+     * exact shape is validated by the full match, not by selection.
+     */
+    private static boolean arityFits(
+            @NotNull C3CallablePsiElement candidate,
+            boolean staticReceiver,
+            @NotNull List<ArgInfo> args)
+    {
+        Signature signature;
+        try
+        {
+            signature = buildSignature(candidate);
+        }
+        catch (Exception e)
+        {
+            return true;
+        }
+        List<ParamInfo> params = signature.params;
+        String ownerText = ownerOf(candidate);
+        int startIndex = 0;
+        if (ownerText != null && !staticReceiver && !params.isEmpty()
+            && InterfaceService.firstParameterMatchesOwner(signature.paramTypes, signature.parameterList, ownerText))
+        {
+            startIndex = 1;
+        }
+        if (startIndex > params.size()) return false;
+
+        java.util.Set<String> paramNames = new java.util.HashSet<>();
+        for (int i = startIndex; i < params.size(); i++)
+        {
+            if (params.get(i).name != null) paramNames.add(params.get(i).name);
+        }
+        int positional = 0;
+        for (ArgInfo arg : args)
+        {
+            if (arg.splat) continue;
+            if (arg.named)
+            {
+                if (arg.name != null && !paramNames.contains(arg.name)) return false;
+                continue;
+            }
+            positional++;
+        }
+        int required = 0;
+        for (int i = startIndex; i < params.size(); i++)
+        {
+            if (params.get(i).required) required++;
+        }
+        if (positional < required) return false;
+        boolean hasVaarg = false;
+        for (int i = startIndex; i < params.size(); i++)
+        {
+            if (params.get(i).vaarg) hasVaarg = true;
+        }
+        if (!hasVaarg && positional > params.size() - startIndex) return false;
+        return true;
     }
 
     private static @Nullable String ownerOf(@NotNull C3CallablePsiElement callable)
@@ -259,20 +525,6 @@ public final class CallChecker
     private static boolean isStaticReceiver(@Nullable C3Expr receiver)
     {
         return receiver instanceof C3TypeExpr;
-    }
-
-    private static @Nullable C3CallablePsiElement resolveCallable(@NotNull PsiReference reference)
-    {
-        PsiElement resolved;
-        try
-        {
-            resolved = reference.resolve();
-        }
-        catch (Exception e)
-        {
-            return null;
-        }
-        return resolved instanceof C3CallablePsiElement callable ? callable : null;
     }
 
     /**
@@ -408,7 +660,9 @@ public final class CallChecker
             if (name != null) name = name.replaceAll("^[#$@]+", "");
             boolean vaarg = parameter.getNode().findChildByType(C3Types.ELLIPSIS) != null;
             String typeText = parameter.getType() != null ? parameter.getType().getText() : null;
-            boolean hasDefault = decl.getExpr() != null;
+            // A bare `...` default (`cmp = ...`) leaves the parameter unset:
+            // it is optional even though there is no value expression.
+            boolean hasDefault = decl.getExpr() != null || hasEllipsisDefault(decl);
             result.add(new ParamInfo(
                 name,
                 typeText,
@@ -417,6 +671,29 @@ public final class CallChecker
                 vaarg ? (typeText != null ? typeText : "any") : null));
         }
         return result;
+    }
+
+    /**
+     * Whether the parameter declaration carries a bare {@code ...} default
+     * (`cmp = ...`): an `ELLIPSIS` leaf directly under the declaration, past
+     * the `=`. Variadic parameters (`args...`) hold theirs inside the
+     * parameter itself and never reach this check.
+     */
+    private static boolean hasEllipsisDefault(@NotNull C3ParamDecl decl)
+    {
+        try
+        {
+            boolean seenEq = false;
+            for (ASTNode child : decl.getNode().getChildren(null))
+            {
+                if (child.getElementType() == C3Types.EQ) seenEq = true;
+                else if (seenEq && child.getElementType() == C3Types.ELLIPSIS) return true;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
     }
 
     static @NotNull List<ArgInfo> buildArgs(@NotNull C3CallInvocation invocation)
@@ -638,20 +915,96 @@ public final class CallChecker
             @NotNull ParamInfo param,
             boolean vaargElement)
     {
-        if (arg.expr == null) return;
+        if (arg.expr instanceof C3LambdaDeclShortExpr lambda)
+        {
+            checkLambdaBody(project, contextModule, holder, lambda, param, vaargElement);
+        }
+        String error = argMismatch(project, contextModule, arg, param, vaargElement);
+        if (error != null && arg.expr != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(arg.expr).create();
+    }
+
+    /**
+     * Return-type check for a short lambda argument (`fn (i) => i * i`)
+     * against the expected function-pointer type, e.g. `IntTransform` =
+     * {@code fn int(int)}. The body infers through the expected parameter
+     * types; block bodies and unknown expectations stay silent.
+     */
+    private static void checkLambdaBody(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull AnnotationHolder holder,
+            @NotNull C3LambdaDeclShortExpr lambda,
+            @NotNull ParamInfo param,
+            boolean vaargElement)
+    {
         String typeText = vaargElement ? param.vaargElement : param.typeText;
         if (typeText == null) return;
+        C3LambdaDecl lambdaDecl = lambda.getLambdaDecl();
+        C3Expr body = lambda.getExpr();
+        if (lambdaDecl == null || body == null) return;
+        String fnText = TypeChecker.underlyingFnTypeForCheck(typeText.strip(), lambda);
+        TypeChecker.FnType expected = fnText != null ? TypeChecker.parseFnType(fnText) : null;
+        if (expected == null) return;
+        String required = "'" + typeText.strip() + "'"
+            + (typeText.strip().equals(fnText) ? "" : " (" + fnText + ")");
+        int lambdaParams = lambdaDecl.getFnParameterList() != null
+            && lambdaDecl.getFnParameterList().getParameterList() != null
+            ? lambdaDecl.getFnParameterList().getParameterList().getParamDeclList().size()
+            : 0;
+        if (lambdaParams != expected.params().size())
+        {
+            error(holder, body, "The lambda doesn't match the required type " + required + ".");
+            return;
+        }
+        InferredType bodyType;
+        try
+        {
+            bodyType = TypeChecker.infer(body);
+        }
+        catch (Exception e)
+        {
+            return;
+        }
+        if (bodyType == null) return;
+        TypeChecker.CastDiagnostic diagnostic;
+        try
+        {
+            diagnostic = TypeChecker.checkCast(project, contextModule, expected.returns(), bodyType, body);
+        }
+        catch (Exception e)
+        {
+            return;
+        }
+        if (diagnostic != null && !diagnostic.warning)
+        {
+            error(holder, body, diagnostic.message);
+        }
+    }
+
+    /**
+     * Per-argument type mismatch, or {@code null} when the argument fits.
+     * Shared by the annotating check and by overload selection's dry run.
+     */
+    private static @Nullable String argMismatch(
+            @NotNull Project project,
+            @Nullable ModuleName contextModule,
+            @NotNull ArgInfo arg,
+            @NotNull ParamInfo param,
+            boolean vaargElement)
+    {
+        if (arg.expr == null) return null;
+        String typeText = vaargElement ? param.vaargElement : param.typeText;
+        if (typeText == null) return null;
         InferredType inferred = TypeChecker.infer(arg.expr);
-        if (inferred == null) return;
-        if (isGenericTypeParam(arg.expr, inferred)) return;
+        if (inferred == null) return null;
+        if (isGenericTypeParam(arg.expr, inferred)) return null;
         inferred = TypeChecker.narrowedSource(arg.expr, inferred);
-        String error = TypeChecker.argumentError(
+        return TypeChecker.argumentError(
             project,
             contextModule,
             param.name != null ? param.name : typeText,
             typeText,
             inferred);
-        if (error != null) holder.newAnnotation(HighlightSeverity.ERROR, error).range(arg.expr).create();
     }
 
     /**
