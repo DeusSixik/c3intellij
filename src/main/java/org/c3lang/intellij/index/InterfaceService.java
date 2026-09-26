@@ -99,8 +99,9 @@ public final class InterfaceService
     }
 
     /**
-     * Interfaces listed in the struct contracts, e.g. {@code MyName} for
-     * {@code struct Baz (MyName)}.
+     * Interfaces listed in the type contracts, e.g. {@code MyName} for
+     * {@code struct Baz (MyName)} or {@code typedef DString (OutStream)}:
+     * contracts may sit on structs and on typedefs alike.
      */
     @NotNull
     public List<FullyQualifiedName> getImplementedInterfaces(
@@ -114,21 +115,82 @@ public final class InterfaceService
             if (impl == null) continue;
             ModuleName structModule = ModuleName.from(declaration);
             if (structModule == null) structModule = structType.getModule();
+            addContracts(result, impl, declaration, structModule);
+        }
+        for (C3TypedefDecl declaration : findTypedefDeclarations(structType, project))
+        {
+            C3InterfaceImpl impl = declaration.getInterfaceImpl();
+            if (impl == null) continue;
+            ModuleName typedefModule = ModuleName.from(declaration);
+            if (typedefModule == null) typedefModule = structType.getModule();
+            addContracts(result, impl, declaration, typedefModule);
+        }
+        return result;
+    }
 
-            List<String> contractTexts = new ArrayList<>();
-            contractTexts.add(impl.getTypeName().getText());
-            for (C3Type contractType : impl.getTypeList())
+    private void addContracts(
+            @NotNull List<FullyQualifiedName> result,
+            @NotNull C3InterfaceImpl impl,
+            @NotNull C3PsiElement declaration,
+            @Nullable ModuleName fallbackModule)
+    {
+        List<String> contractTexts = new ArrayList<>();
+        contractTexts.add(impl.getTypeName().getText());
+        for (C3Type contractType : impl.getTypeList())
+        {
+            contractTexts.add(contractType.getText());
+        }
+        List<ModuleName> imports = ModuleName.getImportList(declaration);
+        for (String text : contractTexts)
+        {
+            for (FullyQualifiedName fqn : contractCandidates(text, fallbackModule, imports))
             {
-                contractTexts.add(contractType.getText());
+                if (!result.contains(fqn)) result.add(fqn);
             }
-            List<ModuleName> imports = ModuleName.getImportList(declaration);
-            for (String text : contractTexts)
+        }
+    }
+
+    /**
+     * Typedef declarations with a given name, e.g. {@code DString} for
+     * {@code typedef DString (OutStream) = ...}. Same index discipline as
+     * the struct/interface lookups above: {@link TypeIndex} scan by full and
+     * short keys, stale entries swallowed.
+     */
+    @NotNull
+    public List<C3TypedefDecl> findTypedefDeclarations(
+            @NotNull FullyQualifiedName typeName,
+            @NotNull Project project)
+    {
+        List<C3TypedefDecl> result = new ArrayList<>();
+        if (DumbService.isDumb(project)) return result;
+        String query = typeName.getFullName();
+        String shortQuery = typeName.getName();
+        try
+        {
+            for (String key : StubIndex.getInstance().getAllKeys(TypeIndex.KEY, project))
             {
-                for (FullyQualifiedName fqn : contractCandidates(text, structModule, imports))
+                if (!key.equals(query) && !key.endsWith("::" + query)
+                    && !key.equals(shortQuery) && !key.endsWith("::" + shortQuery)) continue;
+                for (C3PsiElement element : StubIndex.getElements(
+                        TypeIndex.KEY,
+                        key,
+                        project,
+                        C3ProjectService.getInstance(project).getSearchScope(),
+                        C3PsiElement.class))
                 {
-                    if (!result.contains(fqn)) result.add(fqn);
+                    if (element instanceof C3TypeName name
+                        && name.getText().strip().equals(shortQuery)
+                        && name.getParent() instanceof C3TypedefDecl declaration
+                        && !result.contains(declaration))
+                    {
+                        result.add(declaration);
+                    }
                 }
             }
+        }
+        catch (Exception ignored)
+        {
+            // See findStructDeclarations: never break highlighting on index issues.
         }
         return result;
     }

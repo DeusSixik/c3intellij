@@ -203,6 +203,52 @@ public class CallCheckTest extends BasePlatformTestCase
         assertTrue("Unexpected call errors, got: " + highlights, callErrors(highlights).isEmpty());
     }
 
+    public void testTypedefContractArgToInterfaceOk()
+    {
+        // Mirrors dstring.c3: `typedef DString (OutStream) = ...` carries the
+        // contract on the typedef, so `&report` converts to `OutStream`.
+        myFixture.configureByText("main.c3", """
+            module test;
+            interface OutStream
+            {
+            }
+            typedef DString (OutStream) = void*;
+            fn void take(OutStream out)
+            {
+            }
+            fn void foo()
+            {
+                DString report;
+                take(&report);
+            }
+            """);
+
+        List<HighlightInfo>         highlights = myFixture.doHighlighting();
+        assertTrue("Unexpected call errors, got: " + highlights, callErrors(highlights).isEmpty());
+    }
+
+    public void testTypedefWithoutContractToInterfaceIsError()
+    {
+        myFixture.configureByText("main.c3", """
+            module test;
+            interface OutStream
+            {
+            }
+            typedef Plain = void*;
+            fn void take(OutStream out)
+            {
+            }
+            fn void foo()
+            {
+                Plain p;
+                take(&p);
+            }
+            """);
+        List<HighlightInfo> errors = errorsWithText(myFixture.doHighlighting(),
+            "Cannot pass 'Plain*' for parameter 'out' of type 'OutStream'");
+        assertEquals("Expected one error, got: " + errors, 1, errors.size());
+    }
+
     public void testArgTypeMismatchIsError()
     {
         myFixture.configureByText("main.c3", """

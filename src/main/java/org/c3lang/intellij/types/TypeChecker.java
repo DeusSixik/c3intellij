@@ -732,8 +732,9 @@ public final class TypeChecker
     /**
      * Implicit conversion of a struct (or a pointer to it) to an interface
      * it implements, e.g. {@code File*} to {@code OutStream} when declared
-     * as {@code struct File (InStream, OutStream)}. Mirrors the compiler rule
-     * behind {@code MyName a = &b;}.
+     * as {@code struct File (InStream, OutStream)}, or {@code DString*} to
+     * {@code OutStream} for {@code typedef DString (OutStream) = ...}.
+     * Mirrors the compiler rule behind {@code MyName a = &b;}.
      */
     private static boolean interfaceAssignable(
             @NotNull Project project,
@@ -749,6 +750,10 @@ public final class TypeChecker
         if (!isInterfaceName(cleanTarget, project)) return false;
         String structName = interfaceSourceStruct(source);
         if (structName == null) return false;
+        // The contract may sit on the named type itself (a typedef like
+        // `DString`), not only on the resolved underlying struct: check the
+        // original name first, then the alias-resolved one.
+        if (staticallyImplements(structName, cleanTarget, project)) return true;
         String resolved = resolveAlias(structName, project, contextModule, 0);
         if (resolved != null) structName = resolved;
         return staticallyImplements(structName, cleanTarget, project);
