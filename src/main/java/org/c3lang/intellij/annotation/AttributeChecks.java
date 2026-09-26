@@ -453,7 +453,14 @@ public final class AttributeChecks
                     if (parent instanceof C3StructDeclaration structDecl) attributes = structDecl.getAttributes();
                     else if (parent instanceof C3EnumDeclaration enumDecl) attributes = enumDecl.getAttributes();
                     else if (parent instanceof C3BitstructDeclaration bitDecl) attributes = bitDecl.getAttributes();
-                    else if (parent instanceof C3TypedefDecl typedefDecl) attributes = typedefDecl.getAttributes();
+                    else if (parent instanceof C3TypedefDecl typedefDecl)
+                    {
+                        for (C3Attributes listAttributes : typedefDecl.getAttributesList())
+                        {
+                            if (AttributeSpecs.hasAttribute(listAttributes, "mustinit")) return true;
+                        }
+                        continue;
+                    }
                     else if (parent instanceof C3AliasTypeDecl aliasDecl) attributes = aliasDecl.getAttributes();
                     if (attributes != null && AttributeSpecs.hasAttribute(attributes, "mustinit")) return true;
                 }

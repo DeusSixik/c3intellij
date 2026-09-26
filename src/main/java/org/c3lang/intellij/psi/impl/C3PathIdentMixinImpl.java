@@ -901,6 +901,7 @@ public abstract class C3PathIdentMixinImpl extends C3PsiNamedElementImpl impleme
 			}
 			return Collections.emptyList();
 		}
+
 	}
 
 	private static class C3FuncNameReference extends C3ReferenceBase<C3PathIdent>

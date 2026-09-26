@@ -85,16 +85,17 @@ public final class ModuleName
         }
         if (moduleSection == null) return List.of();
 
-        List<ModuleName> imports = new ArrayList<>();
-        for (C3ImportDecl importDecl : moduleSection.getImportDeclarations())
-        {
-            for (C3ImportPath importPath : importDecl.getImportPaths().getImportPathList())
-            {
-                imports.add(new ModuleName(importPath.getText()));
-            }
-        }
-        return imports;
-    }
+		List<ModuleName> imports = new ArrayList<>();
+		for (C3ImportDecl importDecl : moduleSection.getImportDeclarations())
+		{
+			for (C3ImportPath importPath : importDecl.getImportPaths().getImportPathList())
+			{
+				ModuleName moduleName = importPath.getModuleName();
+				if (moduleName != null) imports.add(moduleName);
+			}
+		}
+		return imports;
+	}
 
     @Override
     public boolean equals(Object o)

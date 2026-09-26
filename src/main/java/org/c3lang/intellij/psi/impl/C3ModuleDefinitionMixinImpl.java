@@ -10,7 +10,6 @@ import org.jetbrains.annotations.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 
 public abstract class C3ModuleDefinitionMixinImpl extends C3PsiElementImpl implements C3ModuleDefinition
 {
@@ -58,13 +57,11 @@ public abstract class C3ModuleDefinitionMixinImpl extends C3PsiElementImpl imple
 	@Override
 	public boolean containsImportOrSameModule(@NotNull C3FullyQualifiedNamePsiElement callable)
 	{
-		if (Objects.equals(callable.getModuleName(), getModuleName()))
-		{
-			return true;
-		}
-		if (isInModuleFamily(callable.getModuleName())) return true;
-		return ModuleName.autoImportedPrefix(callable.getModuleName()) != null
-			|| getImportedModuleCovering(callable.getModuleName()) != null;
+		if (isVisible(callable)) return true;
+		// Upstream `isVisible` has no sibling-module rule: keep ours on top
+		// (verified against c3c and the language docs: same-parent modules
+		// see each other without imports).
+		return isInModuleFamily(callable.getModuleName());
 	}
 
 	/**

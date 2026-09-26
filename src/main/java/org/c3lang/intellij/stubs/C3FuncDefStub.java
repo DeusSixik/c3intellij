@@ -21,6 +21,7 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 	private final @Nullable ShortType returnType;
 	private final @NotNull List<ParamType> parameterTypes;
 	private final @Nullable String conditionKey;
+	private final boolean isPrivate;
 
 	public C3FuncDefStub(
 		@Nullable StubElement<?> parent,
@@ -31,7 +32,8 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		@NotNull FullyQualifiedName fqName,
 		@Nullable ShortType returnType,
 		@NotNull List<ParamType> parameterTypes,
-		@Nullable String conditionKey)
+		@Nullable String conditionKey,
+		boolean isPrivate)
 	{
 		super(parent, elementType);
 		this.sourceFileName = sourceFileName;
@@ -41,6 +43,7 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		this.returnType = returnType;
 		this.parameterTypes = parameterTypes;
 		this.conditionKey = conditionKey;
+		this.isPrivate = isPrivate;
 	}
 
 	public C3FuncDefStub(
@@ -62,7 +65,8 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 				psi.getFnParameterList().getParameterList() != null
 					? psi.getFnParameterList().getParameterList().getParamDeclList()
 					: null),
-			ConditionalGating.conditionKey(psi)
+			ConditionalGating.conditionKey(psi),
+			StubPrivacy.computeFlag(psi)
 		);
 	}
 
@@ -80,7 +84,8 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 			FullyQualifiedName.parse(dataStream.readUTFFast()),
 			readShortType(dataStream),
 			ParamType.deserialize(dataStream),
-			StubStreamExtensions.readNullableUTFFast(dataStream)
+			StubStreamExtensions.readNullableUTFFast(dataStream),
+			dataStream.readBoolean()
 		);
 	}
 
@@ -125,6 +130,11 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		return conditionKey;
 	}
 
+	public boolean isPrivate()
+	{
+		return isPrivate;
+	}
+
 	public void serialize(@NotNull StubOutputStream dataStream) throws IOException
 	{
 		dataStream.writeUTFFast(sourceFileName);
@@ -134,5 +144,6 @@ public class C3FuncDefStub extends StubBase<C3FuncDef>
 		StubStreamExtensions.writeNullableUTFFast(dataStream, returnType != null ? returnType.getFullName() : null);
 		ParamType.serialize(dataStream, parameterTypes);
 		StubStreamExtensions.writeNullableUTFFast(dataStream, conditionKey);
+		dataStream.writeBoolean(isPrivate);
 	}
 }

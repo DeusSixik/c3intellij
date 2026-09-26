@@ -1556,6 +1556,19 @@ public final class TypeChecker
         if (typedefType == null) return null;
         if (typedefType.getGenericParameters() != null) return null;
         C3Type type = typedefType.getType();
+        if (type == null && typedefType.getExpr() instanceof C3TypeExpr typeExpr)
+        {
+            // Since 0.2.11 `typedef_type` prefers `expr`: a plain type RHS
+            // parses as `type_expr` wrapping the type (`alias CharPtr = char*`).
+            try
+            {
+                type = typeExpr.getType();
+            }
+            catch (Exception ignored)
+            {
+                type = null;
+            }
+        }
         if (type == null)
         {
             // `alias F = fn int(int);`: the right-hand side is a function
